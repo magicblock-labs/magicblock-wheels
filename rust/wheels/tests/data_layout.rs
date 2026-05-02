@@ -1,11 +1,11 @@
 use wheels::__private::pinocchio::error::ProgramError;
-use wheels::variable_offset_layout;
+use wheels::data_layout;
 use wheels::DataLayoutError;
 
 #[repr(align(8))]
 struct Aligned<const N: usize>([u8; N]);
 
-#[variable_offset_layout(buffer_offset = 0)]
+#[data_layout(buffer_offset = 0)]
 struct PrivateTransferArgs {
     shuttle_id: u32,
     amount: u64,
@@ -80,7 +80,7 @@ fn variable_layout_private_args() {
     assert_eq!(&encoded_out[expected_len..], &[255, 255, 255, 255]);
 }
 
-#[variable_offset_layout(buffer_offset = 0)]
+#[data_layout(buffer_offset = 0)]
 struct VariableOffsetViewArgs {
     header: u16,
     validator: Option<u32>,
@@ -287,7 +287,7 @@ fn variable_layout_error_converts_to_program_error() {
     );
 }
 
-#[variable_offset_layout(buffer_offset = 0)]
+#[data_layout(buffer_offset = 0)]
 struct BorrowedAfterStableVariableArgs {
     pad: [u8; 7],
     #[flexible = 1]
@@ -329,7 +329,7 @@ fn variable_layout_rejects_misaligned_base_buffer_for_borrowed_fields() {
     );
 }
 
-#[variable_offset_layout(buffer_offset = 1)]
+#[data_layout(buffer_offset = 1)]
 struct UnalignedCopyArgs {
     amount: u64,
     counter: u32,
@@ -347,7 +347,7 @@ fn variable_layout_buffer_offset_one_allows_unaligned_copy_only_views() {
     assert_eq!(view.counter(), 7);
 }
 
-#[variable_offset_layout(buffer_offset = 0)]
+#[data_layout(buffer_offset = 0)]
 struct BoolArgs {
     enabled: bool,
     sponsored: Option<bool>,
@@ -378,7 +378,7 @@ fn variable_layout_supports_bool_and_tagged_option_bool() {
     assert_eq!(value.encode().unwrap(), vec![1, 1, 1, 9, 0]);
 }
 
-#[variable_offset_layout(buffer_offset = 0, option = implicit)]
+#[data_layout(buffer_offset = 0, option = implicit)]
 struct ImplicitOptionArgs {
     shuttle_id: u32,
     validator: Option<[u8; 32]>,
@@ -434,7 +434,7 @@ fn variable_layout_supports_implicit_option_without_tag() {
     assert_eq!(some_view.validator(), Some(&[1; 32]));
 }
 
-#[variable_offset_layout(buffer_offset = 0, option = implicit)]
+#[data_layout(buffer_offset = 0, option = implicit)]
 struct ImplicitOptionWithTrailingArgs {
     header: u16,
     validator: Option<[u8; 4]>,
@@ -487,7 +487,7 @@ fn variable_layout_rejects_invalid_implicit_option_length() {
     );
 }
 
-#[variable_offset_layout(buffer_offset = 0, option = implicit)]
+#[data_layout(buffer_offset = 0, option = implicit)]
 struct MultiImplicitOptionArgs {
     amount: u64,
     split: u32,
@@ -553,7 +553,7 @@ fn variable_layout_supports_multiple_implicit_options_with_unique_subset_sums() 
     assert_eq!(both_view.client_ref_id(), Some(99));
 }
 
-#[variable_offset_layout(buffer_offset = 0, option = implicit)]
+#[data_layout(buffer_offset = 0, option = implicit)]
 struct ImplicitBoolArgs {
     amount: u16,
     gasless: Option<bool>,

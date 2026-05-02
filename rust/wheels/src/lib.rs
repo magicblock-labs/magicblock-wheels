@@ -2,7 +2,7 @@
 
 pub extern crate alloc;
 
-pub use wheels_macros::{fixed_offset_layout, variable_offset_layout};
+pub use wheels_macros::data_layout;
 
 pub type Result<T> = core::result::Result<T, DataLayoutError>;
 
@@ -12,18 +12,16 @@ const DATALAYOUT_ERROR_BASE: u32 = 0x4D42_0000;
 #[repr(u32)]
 pub enum DataLayoutError {
     InvalidDataLength = DATALAYOUT_ERROR_BASE + 1,
-    InvalidBufferAlignment = DATALAYOUT_ERROR_BASE + 2,
-    InvalidBufferOffset = DATALAYOUT_ERROR_BASE + 3,
-    InvalidOptionTag = DATALAYOUT_ERROR_BASE + 4,
-    InvalidVectorLength = DATALAYOUT_ERROR_BASE + 5,
-    LengthExceedsCapacity = DATALAYOUT_ERROR_BASE + 6,
-    OutputBufferTooSmall = DATALAYOUT_ERROR_BASE + 7,
-    MissingOptionTag = DATALAYOUT_ERROR_BASE + 8,
-    TruncatedPayload = DATALAYOUT_ERROR_BASE + 9,
-    InvalidFieldAlignment = DATALAYOUT_ERROR_BASE + 10,
-    MissingLengthHeader = DATALAYOUT_ERROR_BASE + 11,
-    TruncatedVectorPayload = DATALAYOUT_ERROR_BASE + 12,
-    InvalidImplicitOptionEncoding = DATALAYOUT_ERROR_BASE + 13,
+    InvalidBufferOffset = DATALAYOUT_ERROR_BASE + 2,
+    InvalidOptionTag = DATALAYOUT_ERROR_BASE + 3,
+    LengthExceedsCapacity = DATALAYOUT_ERROR_BASE + 4,
+    OutputBufferTooSmall = DATALAYOUT_ERROR_BASE + 5,
+    MissingOptionTag = DATALAYOUT_ERROR_BASE + 6,
+    TruncatedPayload = DATALAYOUT_ERROR_BASE + 7,
+    InvalidFieldAlignment = DATALAYOUT_ERROR_BASE + 8,
+    MissingLengthHeader = DATALAYOUT_ERROR_BASE + 9,
+    TruncatedVectorPayload = DATALAYOUT_ERROR_BASE + 10,
+    InvalidImplicitOptionEncoding = DATALAYOUT_ERROR_BASE + 11,
 }
 
 impl DataLayoutError {
@@ -48,10 +46,8 @@ impl core::convert::TryFrom<u32> for DataLayoutError {
     fn try_from(value: u32) -> core::result::Result<Self, Self::Error> {
         match value {
             x if x == Self::InvalidDataLength as u32 => Ok(Self::InvalidDataLength),
-            x if x == Self::InvalidBufferAlignment as u32 => Ok(Self::InvalidBufferAlignment),
             x if x == Self::InvalidBufferOffset as u32 => Ok(Self::InvalidBufferOffset),
             x if x == Self::InvalidOptionTag as u32 => Ok(Self::InvalidOptionTag),
-            x if x == Self::InvalidVectorLength as u32 => Ok(Self::InvalidVectorLength),
             x if x == Self::LengthExceedsCapacity as u32 => Ok(Self::LengthExceedsCapacity),
             x if x == Self::OutputBufferTooSmall as u32 => Ok(Self::OutputBufferTooSmall),
             x if x == Self::MissingOptionTag as u32 => Ok(Self::MissingOptionTag),
@@ -84,10 +80,8 @@ impl pinocchio::error::ToStr for DataLayoutError {
     fn to_str(&self) -> &'static str {
         match self {
             Self::InvalidDataLength => "Invalid data length",
-            Self::InvalidBufferAlignment => "Invalid base buffer alignment",
             Self::InvalidBufferOffset => "Invalid buffer offset",
             Self::InvalidOptionTag => "Invalid option tag",
-            Self::InvalidVectorLength => "Invalid vector length",
             Self::LengthExceedsCapacity => "Length exceeds declared capacity",
             Self::OutputBufferTooSmall => "Output buffer too small",
             Self::MissingOptionTag => "Missing option tag",
