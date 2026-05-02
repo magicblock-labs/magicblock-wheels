@@ -553,7 +553,7 @@ fn variable_layout_rejects_invalid_implicit_option_length() {
 
     assert_eq!(
         ImplicitOptionWithTrailingArgs::decode(&bytes).unwrap_err(),
-        DataLayoutError::InvalidImplicitOptionEncoding
+        DataLayoutError::InvalidDataLength
     );
 }
 

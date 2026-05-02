@@ -137,7 +137,8 @@ pub(crate) fn expand_data_layout(
         max_datalen,
         &field_layouts,
     )?;
-    let data_len_validation = data_len_validation(struct_name, &field_layouts)?;
+    let data_len_validation =
+        data_len_validation(struct_name, min_datalen, max_datalen, &field_layouts)?;
 
     Ok(quote! {
         #emitted_input
@@ -196,8 +197,8 @@ pub(crate) fn expand_data_layout(
                     );
                 }
 
-                #implicit_len_validation
                 #data_len_validation
+                #implicit_len_validation
 
                 let mut offset = 0usize;
                 #(#validate_steps)*
@@ -211,20 +212,6 @@ pub(crate) fn expand_data_layout(
                 let mut len = 0usize;
                 #(#encoded_len_steps)*
                 Ok(len)
-            }
-
-            const fn __flexible_capacity(len_width: usize) -> usize {
-                match len_width {
-                    8 => u32::MAX as usize,
-                    _ => (1usize << (len_width * 8)) - 1,
-                }
-            }
-
-            const fn __flexible_slot_max_len(
-                len_width: usize,
-                elem_size: usize,
-            ) -> usize {
-                len_width + elem_size * Self::__flexible_capacity(len_width)
             }
 
             fn __read_len_header_unchecked(
@@ -243,6 +230,7 @@ pub(crate) fn expand_data_layout(
                 bytes: &[u8],
                 offset: usize,
                 len_width: usize,
+                capacity: usize,
                 field_name: &str,
             ) -> core::result::Result<usize, ::wheels::DataLayoutError> {
                 let mut raw = [0u8; 8];
@@ -250,7 +238,6 @@ pub(crate) fn expand_data_layout(
                 let raw_len = u64::from_le_bytes(raw);
                 match <usize as core::convert::TryFrom<u64>>::try_from(raw_len) {
                     Ok(len) => {
-                        let capacity = Self::__flexible_capacity(len_width);
                         if len > capacity {
                             ::pinocchio_log::log!(
                                 "Length header for field {} encodes {} which exceeds capacity {}",
@@ -434,14 +421,12 @@ impl FieldLayout {
             Self::Vec { elem, flexible } => {
                 let elem_ty = elem.ty();
                 let len_width_lit = usize_lit(flexible.len_width);
+                let capacity_lit = usize_lit(flexible.capacity());
                 Err((
                     (quote!(#len_width_lit), flexible.len_width),
                     (
-                        quote!(Self::__flexible_slot_max_len(
-                            #len_width_lit,
-                            core::mem::size_of::<#elem_ty>(),
-                        )),
-                        flexible.max_slot_len(elem.size()),
+                        quote!(#len_width_lit + core::mem::size_of::<#elem_ty>() * #capacity_lit),
+                        flexible.len_width + elem.size() * flexible.capacity(),
                     ),
                 ))
             }
@@ -467,7 +452,7 @@ impl FieldLayout {
             Self::Vec { elem, flexible } => {
                 let elem_size = usize_lit(elem.size());
                 let len_width = usize_lit(flexible.len_width);
-                let capacity = quote!(Self::__flexible_capacity(#len_width));
+                let capacity = usize_lit(flexible.capacity());
                 quote! {
                     let field_len = self.#field_ident.len();
                     if field_len > #capacity {
@@ -479,30 +464,7 @@ impl FieldLayout {
                         );
                         return Err(::wheels::DataLayoutError::LengthExceedsCapacity);
                     }
-                    let payload_len = match field_len.checked_mul(#elem_size) {
-                        core::option::Option::Some(payload_len) => payload_len,
-                        core::option::Option::None => {
-                            ::pinocchio_log::log!(
-                                "Cannot encode field {}: len {} overflows payload size",
-                                stringify!(#field_ident),
-                                field_len,
-                            );
-                            return Err(::wheels::DataLayoutError::LengthExceedsCapacity);
-                        }
-                    };
-                    len = match len
-                        .checked_add(#len_width)
-                        .and_then(|len| len.checked_add(payload_len))
-                    {
-                        core::option::Option::Some(total_len) => total_len,
-                        core::option::Option::None => {
-                            ::pinocchio_log::log!(
-                                "Cannot encode field {}: encoded length overflows usize",
-                                stringify!(#field_ident),
-                            );
-                            return Err(::wheels::DataLayoutError::LengthExceedsCapacity);
-                        }
-                    };
+                    len += #len_width + field_len * #elem_size;
                 }
             }
         }
@@ -620,6 +582,7 @@ impl FieldLayout {
                     quote!(bytes),
                     quote!(offset),
                     flexible.len_width,
+                    flexible.capacity(),
                     &field_name,
                 );
                 let alignment_check = if elem.align() > 1 {
@@ -639,17 +602,7 @@ impl FieldLayout {
                 };
 
                 quote! {
-                    let data_offset = match offset.checked_add(#len_width_lit) {
-                        core::option::Option::Some(data_offset) => data_offset,
-                        core::option::Option::None => {
-                            ::pinocchio_log::log!(
-                                "Missing length header for field {} at offset {}",
-                                #field_name,
-                                offset,
-                            );
-                            return Err(::wheels::DataLayoutError::MissingLengthHeader);
-                        }
-                    };
+                    let data_offset = offset + #len_width_lit;
                     if data_offset > bytes.len() {
                         ::pinocchio_log::log!(
                             "Missing length header for field {} at offset {}",
@@ -662,27 +615,7 @@ impl FieldLayout {
                     let len = #len_expr;
                     #alignment_check
 
-                    let payload_len = match len.checked_mul(#elem_size) {
-                        core::option::Option::Some(payload_len) => payload_len,
-                        core::option::Option::None => {
-                            ::pinocchio_log::log!(
-                                "Truncated Vec payload for field {}: len {} overflows payload size",
-                                #field_name,
-                                len,
-                            );
-                            return Err(::wheels::DataLayoutError::TruncatedVectorPayload);
-                        }
-                    };
-                    let end = match data_offset.checked_add(payload_len) {
-                        core::option::Option::Some(end) => end,
-                        core::option::Option::None => {
-                            ::pinocchio_log::log!(
-                                "Truncated Vec payload for field {}: payload end overflows usize",
-                                #field_name,
-                            );
-                            return Err(::wheels::DataLayoutError::TruncatedVectorPayload);
-                        }
-                    };
+                    let end = data_offset + len * #elem_size;
                     if end > bytes.len() {
                         ::pinocchio_log::log!(
                             "Truncated Vec payload for field {}: need {} bytes, have {}",
@@ -760,17 +693,11 @@ impl FieldLayout {
                 let len_width = usize_lit(flexible.len_width);
                 quote! {
                     let field_len = self.#field_ident.len();
-                    let field_len = field_len;
                     let len_header = (field_len as u64).to_le_bytes();
                     bytes[offset..offset + #len_width]
                         .copy_from_slice(&len_header[..#len_width]);
                     let start = offset + #len_width;
-                    let payload_len = field_len
-                        .checked_mul(#elem_size)
-                        .expect("encoded length validated");
-                    let end = start
-                        .checked_add(payload_len)
-                        .expect("encoded length validated");
+                    let end = start + field_len * #elem_size;
                     if field_len != 0 {
                         bytes[start..end]
                             .copy_from_slice(::bytemuck::cast_slice(self.#field_ident.as_slice()));
@@ -1555,6 +1482,8 @@ fn public_len_const(
 
 fn data_len_validation(
     struct_name: &Ident,
+    min_datalen: usize,
+    max_datalen: usize,
     layouts: &[FieldLayout],
 ) -> syn::Result<proc_macro2::TokenStream> {
     if let Some(exact_lens) = exact_data_lens(layouts) {
@@ -1586,14 +1515,15 @@ fn data_len_validation(
         });
     }
 
+    let msg = format!(
+        "bytes [len={{}}] cannot be deserialized to {} which needs at least {} and at most {} bytes",
+        struct_name, min_datalen, max_datalen
+    );
     Ok(quote! {
         if bytes.len() < Self::__MIN_DATA_LEN || bytes.len() > Self::__MAX_DATA_LEN {
             ::pinocchio_log::log!(
-                "bytes [len={}] cannot be deserialized to {} which needs at least {} and at most {} bytes",
+                #msg,
                 bytes.len(),
-                stringify!(#struct_name),
-                Self::__MIN_DATA_LEN,
-                Self::__MAX_DATA_LEN,
             );
             return Err(::wheels::DataLayoutError::InvalidDataLength);
         }
@@ -1900,10 +1830,6 @@ impl Flexible {
             _ => (1usize << (self.len_width * 8)) - 1,
         }
     }
-
-    fn max_slot_len(self, elem_size: usize) -> usize {
-        self.len_width + elem_size * self.capacity()
-    }
 }
 
 enum FieldAttribute {
@@ -2052,11 +1978,13 @@ fn checked_read_len_expr(
     bytes_expr: proc_macro2::TokenStream,
     offset_expr: proc_macro2::TokenStream,
     len_width: usize,
+    capacity: usize,
     field_name: &str,
 ) -> proc_macro2::TokenStream {
     let len_width_lit = usize_lit(len_width);
+    let capacity_lit = usize_lit(capacity);
     quote! {
-        Self::__read_len_header(#bytes_expr, #offset_expr, #len_width_lit, #field_name)?
+        Self::__read_len_header(#bytes_expr, #offset_expr, #len_width_lit, #capacity_lit, #field_name)?
     }
 }
 
