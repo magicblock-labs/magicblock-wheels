@@ -1,5 +1,6 @@
 use wheels::__private::pinocchio::error::ProgramError;
 use wheels::variable_offset_layout;
+use wheels::DataLayoutError;
 
 #[repr(align(8))]
 struct Aligned<const N: usize>([u8; N]);
@@ -205,7 +206,7 @@ fn variable_layout_encode_to_rejects_small_output_buffer() {
     let mut out = [0_u8; 20];
     assert_eq!(
         value.encode_to(&mut out).unwrap_err(),
-        ProgramError::AccountDataTooSmall
+        DataLayoutError::OutputBufferTooSmall
     );
 }
 
@@ -219,7 +220,10 @@ fn variable_layout_encode_rejects_vec_len_that_exceeds_len_width() {
         encrypted_data_suffix: vec![],
     };
 
-    assert_eq!(value.encode().unwrap_err(), ProgramError::InvalidRealloc);
+    assert_eq!(
+        value.encode().unwrap_err(),
+        DataLayoutError::LengthExceedsCapacity
+    );
 }
 
 #[test]
@@ -235,7 +239,7 @@ fn variable_layout_try_view_from_rejects_invalid_option_tag() {
 
     assert_eq!(
         VariableOffsetViewArgs::decode(bytes).unwrap_err(),
-        ProgramError::InvalidInstructionData
+        DataLayoutError::InvalidOptionTag
     );
 }
 
@@ -252,7 +256,34 @@ fn variable_layout_try_view_from_rejects_truncated_vec_payload() {
 
     assert_eq!(
         VariableOffsetViewArgs::decode(bytes).unwrap_err(),
-        ProgramError::InvalidInstructionData
+        DataLayoutError::TruncatedVectorPayload
+    );
+}
+
+#[test]
+fn variable_layout_error_converts_to_program_error() {
+    let value = VariableOffsetViewArgs {
+        header: 7,
+        validator: Some(9),
+        payload: vec![1, 2, 3],
+        amount: 77,
+        checksum: 0xBEEF,
+    };
+
+    let mut out = [0_u8; 20];
+    let err = (|| -> Result<(), ProgramError> {
+        value.encode_to(&mut out)?;
+        Ok(())
+    })()
+    .unwrap_err();
+
+    assert_eq!(
+        err,
+        ProgramError::Custom(DataLayoutError::OutputBufferTooSmall as u32)
+    );
+    assert_eq!(
+        <DataLayoutError as core::convert::TryFrom<ProgramError>>::try_from(err).unwrap(),
+        DataLayoutError::OutputBufferTooSmall
     );
 }
 
@@ -294,7 +325,7 @@ fn variable_layout_rejects_misaligned_base_buffer_for_borrowed_fields() {
 
     assert_eq!(
         BorrowedAfterStableVariableArgs::decode(&bytes[1..]).unwrap_err(),
-        ProgramError::InvalidInstructionData
+        DataLayoutError::InvalidBufferOffset
     );
 }
 
@@ -452,7 +483,7 @@ fn variable_layout_rejects_invalid_implicit_option_length() {
 
     assert_eq!(
         ImplicitOptionWithTrailingArgs::decode(&bytes).unwrap_err(),
-        ProgramError::InvalidInstructionData
+        DataLayoutError::InvalidImplicitOptionEncoding
     );
 }
 

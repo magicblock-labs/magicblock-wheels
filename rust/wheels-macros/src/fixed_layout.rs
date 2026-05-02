@@ -16,9 +16,9 @@ fn runtime_crate() -> proc_macro2::TokenStream {
     crate::runtime::runtime_crate("wheels")
 }
 
-fn program_error_ty() -> proc_macro2::TokenStream {
+fn layout_error_ty() -> proc_macro2::TokenStream {
     let runtime_crate = runtime_crate();
-    quote!(#runtime_crate::__private::pinocchio::error::ProgramError)
+    quote!(#runtime_crate::DataLayoutError)
 }
 
 fn pinocchio_log_path() -> proc_macro2::TokenStream {
@@ -168,7 +168,7 @@ pub(crate) fn expand_fixed_offset_layout(
     let where_clause = impl_where_clause(&where_bounds);
 
     let msg = format!("Sum of encodable-sizes must be {}.", datalen);
-    let program_error = program_error_ty();
+    let layout_error = layout_error_ty();
     let pinocchio_log = pinocchio_log_path();
     let alloc_vec_u8 = alloc_vec_u8_ty();
     let alloc_vec = alloc_vec_macro_path();
@@ -226,17 +226,17 @@ pub(crate) fn expand_fixed_offset_layout(
 
             pub fn decode(
                 bytes: &[u8],
-            ) -> core::result::Result<#view_name<'_>, #program_error> {
+            ) -> core::result::Result<#view_name<'_>, #layout_error> {
                 Self::__validate_bytes(bytes)?;
                 Ok(#view_name { bytes })
             }
 
-            pub fn encode_to(&self, bytes: &mut [u8]) -> core::result::Result<(), #program_error> {
+            pub fn encode_to(&self, bytes: &mut [u8]) -> core::result::Result<(), #layout_error> {
                 #fields_encode_expr;
                 Ok(())
             }
 
-            pub fn encode(&self) -> core::result::Result<#encoding_ret_ty, #program_error> {
+            pub fn encode(&self) -> core::result::Result<#encoding_ret_ty, #layout_error> {
                 let mut bytes = #encoding_buf_var;
                 self.encode_to(&mut bytes)?;
                 Ok(bytes)
@@ -244,17 +244,13 @@ pub(crate) fn expand_fixed_offset_layout(
 
             fn __validate_bytes(
                 bytes: &[u8],
-            ) -> core::result::Result<(), #program_error> {
+            ) -> core::result::Result<(), #layout_error> {
                 if #datalen_check {
                     #pinocchio_log::log!(#check_logfmt, bytes.len());
-                    return Err(
-                        #program_error::InvalidInstructionData,
-                    );
+                    return Err(#layout_error::InvalidDataLength);
                 } else if bytes.as_ptr().align_offset(8) != 0 {
                     #pinocchio_log::log!("bytes [align_offset={}] cannot be deserialized to {} which requires 8-byte alignment", bytes.as_ptr().align_offset(8), stringify!(#struct_name));
-                    return Err(
-                        #program_error::InvalidInstructionData,
-                    );
+                    return Err(#layout_error::InvalidBufferAlignment);
                 }
 
                 #(#validate_steps)*
@@ -266,13 +262,13 @@ pub(crate) fn expand_fixed_offset_layout(
                 bytes: &[u8],
                 offset: usize,
                 field_name: &'static str,
-            ) -> core::result::Result<(), #program_error> {
+            ) -> core::result::Result<(), #layout_error> {
                 match bytes[offset] {
                     0 | 1 => {}
 
                     tag => {
                         #pinocchio_log::log!("Invalid Option tag for field {}::{} : tag = {} (which should be either 0 or 1)", stringify!(#struct_name), field_name, tag);
-                        return Err(#program_error::InvalidInstructionData);
+                        return Err(#layout_error::InvalidOptionTag);
                     }
                 }
                 Ok(())
@@ -285,7 +281,7 @@ pub(crate) fn expand_fixed_offset_layout(
                 len_width: usize,
                 field_name: &'static str,
                 expect_msg: &'static str
-            ) -> core::result::Result<(), #program_error> {
+            ) -> core::result::Result<(), #layout_error> {
                 let len = match len_width {
                     1 =>  bytes[offset] as usize,
                     2 => {
@@ -298,7 +294,7 @@ pub(crate) fn expand_fixed_offset_layout(
                 };
                 if len > capacity {
                     #pinocchio_log::log!("Invalid Vec length for field {}::{} : capacity = {}, len = {}", stringify!(#struct_name), field_name, capacity, len);
-                    return Err(#program_error::InvalidInstructionData);
+                    return Err(#layout_error::InvalidVectorLength);
                 }
                 Ok(())
             }
@@ -602,7 +598,7 @@ impl FixedFieldKind {
         field_ident: &Ident,
     ) -> proc_macro2::TokenStream {
         let offset = usize_lit(offset);
-        let program_error = program_error_ty();
+        let layout_error = layout_error_ty();
         let bytemuck = bytemuck_path();
         match self {
             Self::Value { value, optional } => {
@@ -649,7 +645,7 @@ impl FixedFieldKind {
                         #fields_encode_expr
 
                         if self.#field_ident.len() > #cap {
-                            return Err(#program_error::InvalidRealloc);
+                            return Err(#layout_error::LengthExceedsCapacity);
                         }
 
                         bytes[#offset..#offset + #len_width].copy_from_slice(#bytemuck::bytes_of(&(self.#field_ident.len() as #len_width_ty)));
@@ -665,7 +661,7 @@ impl FixedFieldKind {
                         #fields_encode_expr
 
                         if self.#field_ident.len() > #max_capacity {
-                            return Err(#program_error::InvalidRealloc);
+                            return Err(#layout_error::LengthExceedsCapacity);
                         } else if !self.#field_ident.is_empty() {
                             bytes[#offset..#offset + #len_width].copy_from_slice(#bytemuck::bytes_of(&(self.#field_ident.len() as #len_width_ty)));
                             bytes[#offset + #len_width..#offset + #len_width + self.#field_ident.len() * #elem_size].copy_from_slice(#bytemuck::cast_slice(&self.#field_ident.as_slice()));

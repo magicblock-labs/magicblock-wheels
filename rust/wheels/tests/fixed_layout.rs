@@ -1,5 +1,5 @@
-use wheels::__private::pinocchio::error::ProgramError;
 use wheels::fixed_offset_layout;
+use wheels::DataLayoutError;
 
 #[repr(align(8))]
 struct Aligned<const N: usize>([u8; N]);
@@ -136,7 +136,7 @@ fn fixed_offset_layout_rejects_invalid_vec_len() {
 
     assert_eq!(
         FixedReadonlyArgs::decode(bytes).unwrap_err(),
-        ProgramError::InvalidInstructionData
+        DataLayoutError::InvalidVectorLength
     );
 }
 

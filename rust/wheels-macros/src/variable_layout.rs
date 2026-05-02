@@ -19,9 +19,9 @@ fn runtime_crate() -> proc_macro2::TokenStream {
     crate::runtime::runtime_crate("wheels")
 }
 
-fn program_error_ty() -> proc_macro2::TokenStream {
+fn layout_error_ty() -> proc_macro2::TokenStream {
     let runtime_crate = runtime_crate();
-    quote!(#runtime_crate::__private::pinocchio::error::ProgramError)
+    quote!(#runtime_crate::DataLayoutError)
 }
 
 fn pinocchio_log_path() -> proc_macro2::TokenStream {
@@ -169,7 +169,7 @@ pub(crate) fn expand_variable_offset_layout(
     )?;
     let data_len_validation =
         data_len_validation(struct_name, min_datalen, max_datalen, &field_layouts)?;
-    let program_error = program_error_ty();
+    let layout_error = layout_error_ty();
     let pinocchio_log = pinocchio_log_path();
     let alloc_vec_u8 = alloc_vec_u8_ty();
     let alloc_vec = alloc_vec_macro_path();
@@ -185,7 +185,7 @@ pub(crate) fn expand_variable_offset_layout(
 
             pub fn decode(
                 bytes: &[u8],
-            ) -> core::result::Result<#view_name<'_>, #program_error> {
+            ) -> core::result::Result<#view_name<'_>, #layout_error> {
                 Self::__validate_bytes(bytes)?;
                 Ok(#view_name { bytes })
             }
@@ -193,7 +193,7 @@ pub(crate) fn expand_variable_offset_layout(
             pub fn encode_to(
                 &self,
                 bytes: &mut [u8],
-            ) -> core::result::Result<(), #program_error> {
+            ) -> core::result::Result<(), #layout_error> {
                 let encoded_len = self.__encoded_len()?;
                 if bytes.len() < encoded_len {
                     #pinocchio_log::log!(
@@ -202,7 +202,7 @@ pub(crate) fn expand_variable_offset_layout(
                         stringify!(#struct_name),
                         encoded_len,
                     );
-                    return Err(#program_error::AccountDataTooSmall);
+                    return Err(#layout_error::OutputBufferTooSmall);
                 }
 
                 let mut offset = 0usize;
@@ -210,7 +210,7 @@ pub(crate) fn expand_variable_offset_layout(
                 Ok(())
             }
 
-            pub fn encode(&self) -> core::result::Result<#alloc_vec_u8, #program_error> {
+            pub fn encode(&self) -> core::result::Result<#alloc_vec_u8, #layout_error> {
                 let mut bytes = #alloc_vec![0; self.__encoded_len()?];
                 self.encode_to(&mut bytes)?;
                 Ok(bytes)
@@ -218,7 +218,7 @@ pub(crate) fn expand_variable_offset_layout(
 
             fn __validate_bytes(
                 bytes: &[u8],
-            ) -> core::result::Result<(), #program_error> {
+            ) -> core::result::Result<(), #layout_error> {
                 if (bytes.as_ptr() as usize) % 8 != #buffer_offset_lit {
                     #pinocchio_log::log!(
                         "bytes [ptr_mod_8={}] cannot be deserialized to {} which requires buffer_offset = {} from an 8-byte aligned base",
@@ -227,12 +227,12 @@ pub(crate) fn expand_variable_offset_layout(
                         #buffer_offset_lit,
                     );
                     return Err(
-                        #program_error::InvalidInstructionData,
+                        #layout_error::InvalidBufferOffset,
                     );
                 }
 
-                #data_len_validation
                 #implicit_len_validation
+                #data_len_validation
 
                 let mut offset = 0usize;
                 #(#validate_steps)*
@@ -242,7 +242,7 @@ pub(crate) fn expand_variable_offset_layout(
 
             fn __encoded_len(
                 &self,
-            ) -> core::result::Result<usize, #program_error> {
+            ) -> core::result::Result<usize, #layout_error> {
                 let mut len = 0usize;
                 #(#encoded_len_steps)*
                 Ok(len)
@@ -422,7 +422,7 @@ impl FieldLayout {
 
     fn gen_encoded_len_step(&self, field_ident: &Ident) -> proc_macro2::TokenStream {
         let pinocchio_log = pinocchio_log_path();
-        let program_error = program_error_ty();
+        let layout_error = layout_error_ty();
         match self {
             Self::Value { value, optional } => {
                 let value_size = usize_lit(value.size());
@@ -451,7 +451,7 @@ impl FieldLayout {
                             field_len,
                             #capacity,
                         );
-                        return Err(#program_error::InvalidRealloc);
+                        return Err(#layout_error::LengthExceedsCapacity);
                     }
                     len += #len_width + field_len * #elem_size;
                 }
@@ -466,7 +466,7 @@ impl FieldLayout {
     ) -> proc_macro2::TokenStream {
         let field_name = field_ident.to_string();
         let pinocchio_log = pinocchio_log_path();
-        let program_error = program_error_ty();
+        let layout_error = layout_error_ty();
 
         match self {
             Self::Value { value, optional } => {
@@ -481,7 +481,7 @@ impl FieldLayout {
                                 data_offset,
                                 #value_align,
                             );
-                            return Err(#program_error::InvalidInstructionData);
+                            return Err(#layout_error::InvalidFieldAlignment);
                         }
                     }
                 } else {
@@ -500,7 +500,7 @@ impl FieldLayout {
                                 end,
                                 bytes.len(),
                             );
-                            return Err(#program_error::InvalidInstructionData);
+                            return Err(#layout_error::TruncatedPayload);
                         }
                         offset = end;
                     },
@@ -511,7 +511,7 @@ impl FieldLayout {
                                 #field_name,
                                 offset,
                             );
-                            return Err(#program_error::InvalidInstructionData);
+                            return Err(#layout_error::MissingOptionTag);
                         }
 
                         match bytes[offset] {
@@ -529,7 +529,7 @@ impl FieldLayout {
                                         end,
                                         bytes.len(),
                                     );
-                                    return Err(#program_error::InvalidInstructionData);
+                                    return Err(#layout_error::TruncatedPayload);
                                 }
                                 offset = end;
                             }
@@ -539,7 +539,7 @@ impl FieldLayout {
                                     #field_name,
                                     tag,
                                 );
-                                return Err(#program_error::InvalidInstructionData);
+                                return Err(#layout_error::InvalidOptionTag);
                             }
                         }
                     },
@@ -557,7 +557,7 @@ impl FieldLayout {
                                         end,
                                         bytes.len(),
                                     );
-                                    return Err(#program_error::InvalidInstructionData);
+                                    return Err(#layout_error::TruncatedPayload);
                                 }
                                 offset = end;
                             }
@@ -588,7 +588,7 @@ impl FieldLayout {
                                 data_offset,
                                 #elem_align,
                             );
-                            return Err(#program_error::InvalidInstructionData);
+                            return Err(#layout_error::InvalidFieldAlignment);
                         }
                     }
                 } else {
@@ -603,7 +603,7 @@ impl FieldLayout {
                             #field_name,
                             offset,
                         );
-                        return Err(#program_error::InvalidInstructionData);
+                        return Err(#layout_error::MissingLengthHeader);
                     }
 
                     let len = #len_expr;
@@ -617,7 +617,7 @@ impl FieldLayout {
                             end,
                             bytes.len(),
                         );
-                        return Err(#program_error::InvalidInstructionData);
+                        return Err(#layout_error::TruncatedVectorPayload);
                     }
 
                     offset = end;
@@ -1409,7 +1409,7 @@ fn implicit_len_validation(
     layouts: &[FieldLayout],
 ) -> syn::Result<proc_macro2::TokenStream> {
     let pinocchio_log = pinocchio_log_path();
-    let program_error = program_error_ty();
+    let layout_error = layout_error_ty();
     let len_map = implicit_len_map(fields, layouts, min_datalen)?;
     if len_map.is_empty() {
         return Ok(quote!());
@@ -1428,7 +1428,7 @@ fn implicit_len_validation(
                 bytes.len(),
                 #valid_lens,
             );
-            return Err(#program_error::InvalidInstructionData);
+            return Err(#layout_error::InvalidImplicitOptionEncoding);
         }
     })
 }
@@ -1500,7 +1500,7 @@ fn data_len_validation(
     layouts: &[FieldLayout],
 ) -> syn::Result<proc_macro2::TokenStream> {
     let pinocchio_log = pinocchio_log_path();
-    let program_error = program_error_ty();
+    let layout_error = layout_error_ty();
     if let Some(exact_lens) = exact_data_lens(layouts) {
         if exact_lens.len() == 1 {
             let msg = format!(
@@ -1510,7 +1510,7 @@ fn data_len_validation(
             return Ok(quote! {
                 if bytes.len() != Self::DATA_LEN {
                     #pinocchio_log::log!(#msg, bytes.len());
-                    return Err(#program_error::InvalidInstructionData);
+                    return Err(#layout_error::InvalidDataLength);
                 }
             });
         }
@@ -1525,7 +1525,7 @@ fn data_len_validation(
                     stringify!(#struct_name),
                     #valid_lens,
                 );
-                return Err(#program_error::InvalidInstructionData);
+                return Err(#layout_error::InvalidDataLength);
             }
         });
     }
@@ -1537,7 +1537,7 @@ fn data_len_validation(
     Ok(quote! {
         if bytes.len() < Self::__MIN_DATA_LEN || bytes.len() > Self::__MAX_DATA_LEN {
             #pinocchio_log::log!(#msg, bytes.len());
-            return Err(#program_error::InvalidInstructionData);
+            return Err(#layout_error::InvalidDataLength);
         }
     })
 }
