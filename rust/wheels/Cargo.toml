@@ -1,0 +1,10 @@
+[package]
+name = "wheels"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bytemuck = { version = "1", default-features = false }
+pinocchio = { version = "0.10.2", features = ["cpi"] }
+pinocchio-log = "0.5.1"
+wheels-macros = { path = "../wheels-macros" }
