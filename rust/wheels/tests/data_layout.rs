@@ -1,4 +1,6 @@
-use wheels::__private::pinocchio::error::ProgramError;
+extern crate alloc;
+
+use pinocchio::error::ProgramError;
 use wheels::data_layout;
 use wheels::DataLayoutError;
 
@@ -252,7 +254,10 @@ struct EightByteFlexibleArgs {
 #[test]
 fn data_layout_supports_eight_byte_length_prefixes() {
     assert_eq!(EightByteFlexibleArgs::DATA_LEN_RANGE.0, 11);
-    assert_eq!(EightByteFlexibleArgs::DATA_LEN_RANGE.1, usize::MAX);
+    assert_eq!(
+        EightByteFlexibleArgs::DATA_LEN_RANGE.1,
+        11 + u32::MAX as usize
+    );
 
     let mut aligned = Aligned([0; 18]);
     let bytes = &mut aligned.0;

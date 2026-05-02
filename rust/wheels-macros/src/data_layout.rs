@@ -14,35 +14,6 @@ const FIELD_ATTRIBUTES: &[&str] = &["capacity", "flexible"];
 
 const MAX_LEN_WIDTH: usize = 8;
 
-fn runtime_crate() -> proc_macro2::TokenStream {
-    crate::runtime::runtime_crate("wheels")
-}
-
-fn layout_error_ty() -> proc_macro2::TokenStream {
-    let runtime_crate = runtime_crate();
-    quote!(#runtime_crate::DataLayoutError)
-}
-
-fn pinocchio_log_path() -> proc_macro2::TokenStream {
-    let runtime_crate = runtime_crate();
-    quote!(#runtime_crate::__private::pinocchio_log)
-}
-
-fn bytemuck_path() -> proc_macro2::TokenStream {
-    let runtime_crate = runtime_crate();
-    quote!(#runtime_crate::__private::bytemuck)
-}
-
-fn alloc_vec_u8_ty() -> proc_macro2::TokenStream {
-    let runtime_crate = runtime_crate();
-    quote!(#runtime_crate::__private::alloc::vec::Vec<u8>)
-}
-
-fn alloc_vec_macro_path() -> proc_macro2::TokenStream {
-    let runtime_crate = runtime_crate();
-    quote!(#runtime_crate::__private::alloc::vec)
-}
-
 pub(crate) fn expand_data_layout(
     attr: &str,
     input: &ItemStruct,
@@ -80,14 +51,14 @@ pub(crate) fn expand_data_layout(
     let mut max_datalen_expr = quote!();
     let mut update_maxmin_datalen =
         |(slot_min_len_expr, slot_min_len), (slot_max_len_expr, slot_max_len)| {
-            min_datalen = min_datalen.saturating_add(slot_min_len);
-            max_datalen = max_datalen.saturating_add(slot_max_len);
+            min_datalen += slot_min_len;
+            max_datalen += slot_max_len;
             if min_datalen_expr.is_empty() {
                 min_datalen_expr = slot_min_len_expr;
                 max_datalen_expr = slot_max_len_expr;
             } else {
-                min_datalen_expr = quote!((#min_datalen_expr).saturating_add(#slot_min_len_expr));
-                max_datalen_expr = quote!((#max_datalen_expr).saturating_add(#slot_max_len_expr));
+                min_datalen_expr = quote!(#min_datalen_expr + #slot_min_len_expr);
+                max_datalen_expr = quote!(#max_datalen_expr + #slot_max_len_expr);
             }
         };
 
@@ -167,10 +138,6 @@ pub(crate) fn expand_data_layout(
         &field_layouts,
     )?;
     let data_len_validation = data_len_validation(struct_name, &field_layouts)?;
-    let layout_error = layout_error_ty();
-    let pinocchio_log = pinocchio_log_path();
-    let alloc_vec_u8 = alloc_vec_u8_ty();
-    let alloc_vec = alloc_vec_macro_path();
 
     Ok(quote! {
         #emitted_input
@@ -183,7 +150,7 @@ pub(crate) fn expand_data_layout(
 
             pub fn decode(
                 bytes: &[u8],
-            ) -> core::result::Result<#view_name<'_>, #layout_error> {
+            ) -> core::result::Result<#view_name<'_>, ::wheels::DataLayoutError> {
                 Self::__validate_bytes(bytes)?;
                 Ok(#view_name { bytes })
             }
@@ -191,16 +158,16 @@ pub(crate) fn expand_data_layout(
             pub fn encode_to(
                 &self,
                 bytes: &mut [u8],
-            ) -> core::result::Result<(), #layout_error> {
+            ) -> core::result::Result<(), ::wheels::DataLayoutError> {
                 let encoded_len = self.__encoded_len()?;
                 if bytes.len() < encoded_len {
-                    #pinocchio_log::log!(
+                    ::pinocchio_log::log!(
                         "bytes [len={}] are too small to encode {} which needs {} bytes",
                         bytes.len(),
                         stringify!(#struct_name),
                         encoded_len,
                     );
-                    return Err(#layout_error::OutputBufferTooSmall);
+                    return Err(::wheels::DataLayoutError::OutputBufferTooSmall);
                 }
 
                 let mut offset = 0usize;
@@ -208,24 +175,24 @@ pub(crate) fn expand_data_layout(
                 Ok(())
             }
 
-            pub fn encode(&self) -> core::result::Result<#alloc_vec_u8, #layout_error> {
-                let mut bytes = #alloc_vec![0; self.__encoded_len()?];
+            pub fn encode(&self) -> core::result::Result<::alloc::vec::Vec<u8>, ::wheels::DataLayoutError> {
+                let mut bytes = ::alloc::vec![0; self.__encoded_len()?];
                 self.encode_to(&mut bytes)?;
                 Ok(bytes)
             }
 
             fn __validate_bytes(
                 bytes: &[u8],
-            ) -> core::result::Result<(), #layout_error> {
+            ) -> core::result::Result<(), ::wheels::DataLayoutError> {
                 if (bytes.as_ptr() as usize) % 8 != #buffer_offset_lit {
-                    #pinocchio_log::log!(
+                    ::pinocchio_log::log!(
                         "bytes [ptr_mod_8={}] cannot be deserialized to {} which requires buffer_offset = {} from an 8-byte aligned base",
                         (bytes.as_ptr() as usize) % 8,
                         stringify!(#struct_name),
                         #buffer_offset_lit,
                     );
                     return Err(
-                        #layout_error::InvalidBufferOffset,
+                        ::wheels::DataLayoutError::InvalidBufferOffset,
                     );
                 }
 
@@ -240,18 +207,16 @@ pub(crate) fn expand_data_layout(
 
             fn __encoded_len(
                 &self,
-            ) -> core::result::Result<usize, #layout_error> {
+            ) -> core::result::Result<usize, ::wheels::DataLayoutError> {
                 let mut len = 0usize;
                 #(#encoded_len_steps)*
                 Ok(len)
             }
 
             const fn __flexible_capacity(len_width: usize) -> usize {
-                let bits = len_width.saturating_mul(8);
-                if bits >= usize::BITS as usize {
-                    usize::MAX
-                } else {
-                    (1usize << bits) - 1
+                match len_width {
+                    8 => u32::MAX as usize,
+                    _ => (1usize << (len_width * 8)) - 1,
                 }
             }
 
@@ -259,9 +224,7 @@ pub(crate) fn expand_data_layout(
                 len_width: usize,
                 elem_size: usize,
             ) -> usize {
-                len_width.saturating_add(
-                    elem_size.saturating_mul(Self::__flexible_capacity(len_width))
-                )
+                len_width + elem_size * Self::__flexible_capacity(len_width)
             }
 
             fn __read_len_header_unchecked(
@@ -281,19 +244,32 @@ pub(crate) fn expand_data_layout(
                 offset: usize,
                 len_width: usize,
                 field_name: &str,
-            ) -> core::result::Result<usize, #layout_error> {
+            ) -> core::result::Result<usize, ::wheels::DataLayoutError> {
                 let mut raw = [0u8; 8];
                 raw[..len_width].copy_from_slice(&bytes[offset..offset + len_width]);
                 let raw_len = u64::from_le_bytes(raw);
                 match <usize as core::convert::TryFrom<u64>>::try_from(raw_len) {
-                    Ok(len) => Ok(len),
+                    Ok(len) => {
+                        let capacity = Self::__flexible_capacity(len_width);
+                        if len > capacity {
+                            ::pinocchio_log::log!(
+                                "Length header for field {} encodes {} which exceeds capacity {}",
+                                field_name,
+                                len,
+                                capacity,
+                            );
+                            Err(::wheels::DataLayoutError::LengthExceedsCapacity)
+                        } else {
+                            Ok(len)
+                        }
+                    }
                     Err(_) => {
-                        #pinocchio_log::log!(
+                        ::pinocchio_log::log!(
                             "Length header for field {} encodes {} which exceeds this target's capacity",
                             field_name,
                             raw_len,
                         );
-                        Err(#layout_error::LengthExceedsCapacity)
+                        Err(::wheels::DataLayoutError::LengthExceedsCapacity)
                     }
                 }
             }
@@ -473,8 +449,6 @@ impl FieldLayout {
     }
 
     fn gen_encoded_len_step(&self, field_ident: &Ident) -> proc_macro2::TokenStream {
-        let pinocchio_log = pinocchio_log_path();
-        let layout_error = layout_error_ty();
         match self {
             Self::Value { value, optional } => {
                 let value_size = usize_lit(value.size());
@@ -497,23 +471,23 @@ impl FieldLayout {
                 quote! {
                     let field_len = self.#field_ident.len();
                     if field_len > #capacity {
-                        #pinocchio_log::log!(
+                        ::pinocchio_log::log!(
                             "Cannot encode field {}: len {} exceeds max {}",
                             stringify!(#field_ident),
                             field_len,
                             #capacity,
                         );
-                        return Err(#layout_error::LengthExceedsCapacity);
+                        return Err(::wheels::DataLayoutError::LengthExceedsCapacity);
                     }
                     let payload_len = match field_len.checked_mul(#elem_size) {
                         core::option::Option::Some(payload_len) => payload_len,
                         core::option::Option::None => {
-                            #pinocchio_log::log!(
+                            ::pinocchio_log::log!(
                                 "Cannot encode field {}: len {} overflows payload size",
                                 stringify!(#field_ident),
                                 field_len,
                             );
-                            return Err(#layout_error::LengthExceedsCapacity);
+                            return Err(::wheels::DataLayoutError::LengthExceedsCapacity);
                         }
                     };
                     len = match len
@@ -522,11 +496,11 @@ impl FieldLayout {
                     {
                         core::option::Option::Some(total_len) => total_len,
                         core::option::Option::None => {
-                            #pinocchio_log::log!(
+                            ::pinocchio_log::log!(
                                 "Cannot encode field {}: encoded length overflows usize",
                                 stringify!(#field_ident),
                             );
-                            return Err(#layout_error::LengthExceedsCapacity);
+                            return Err(::wheels::DataLayoutError::LengthExceedsCapacity);
                         }
                     };
                 }
@@ -540,8 +514,6 @@ impl FieldLayout {
         field_ident: &Ident,
     ) -> proc_macro2::TokenStream {
         let field_name = field_ident.to_string();
-        let pinocchio_log = pinocchio_log_path();
-        let layout_error = layout_error_ty();
 
         match self {
             Self::Value { value, optional } => {
@@ -550,13 +522,13 @@ impl FieldLayout {
                 let alignment_check = if matches!(value.access_mode(), AccessMode::Ref) {
                     quote! {
                         if data_offset % #value_align != 0 {
-                            #pinocchio_log::log!(
+                            ::pinocchio_log::log!(
                                 "Invalid alignment for field {}: payload starts at offset {}, expected {}-byte alignment",
                                 #field_name,
                                 data_offset,
                                 #value_align,
                             );
-                            return Err(#layout_error::InvalidFieldAlignment);
+                            return Err(::wheels::DataLayoutError::InvalidFieldAlignment);
                         }
                     }
                 } else {
@@ -569,24 +541,24 @@ impl FieldLayout {
                         #alignment_check
                         let end = data_offset + #value_size;
                         if end > bytes.len() {
-                            #pinocchio_log::log!(
+                            ::pinocchio_log::log!(
                                 "Truncated payload for field {}: need {} bytes, have {}",
                                 #field_name,
                                 end,
                                 bytes.len(),
                             );
-                            return Err(#layout_error::TruncatedPayload);
+                            return Err(::wheels::DataLayoutError::TruncatedPayload);
                         }
                         offset = end;
                     },
                     OptionalKind::Tagged => quote! {
                         if offset >= bytes.len() {
-                            #pinocchio_log::log!(
+                            ::pinocchio_log::log!(
                                 "Missing Option tag for field {} at offset {}",
                                 #field_name,
                                 offset,
                             );
-                            return Err(#layout_error::MissingOptionTag);
+                            return Err(::wheels::DataLayoutError::MissingOptionTag);
                         }
 
                         match bytes[offset] {
@@ -598,23 +570,23 @@ impl FieldLayout {
                                 #alignment_check
                                 let end = data_offset + #value_size;
                                 if end > bytes.len() {
-                                    #pinocchio_log::log!(
+                                    ::pinocchio_log::log!(
                                         "Truncated payload for field {}: need {} bytes, have {}",
                                         #field_name,
                                         end,
                                         bytes.len(),
                                     );
-                                    return Err(#layout_error::TruncatedPayload);
+                                    return Err(::wheels::DataLayoutError::TruncatedPayload);
                                 }
                                 offset = end;
                             }
                             tag => {
-                                #pinocchio_log::log!(
+                                ::pinocchio_log::log!(
                                     "Invalid Option tag for field {}: tag = {}",
                                     #field_name,
                                     tag,
                                 );
-                                return Err(#layout_error::InvalidOptionTag);
+                                return Err(::wheels::DataLayoutError::InvalidOptionTag);
                             }
                         }
                     },
@@ -626,13 +598,13 @@ impl FieldLayout {
                                 #alignment_check
                                 let end = data_offset + #value_size;
                                 if end > bytes.len() {
-                                    #pinocchio_log::log!(
+                                    ::pinocchio_log::log!(
                                         "Truncated payload for field {}: need {} bytes, have {}",
                                         #field_name,
                                         end,
                                         bytes.len(),
                                     );
-                                    return Err(#layout_error::TruncatedPayload);
+                                    return Err(::wheels::DataLayoutError::TruncatedPayload);
                                 }
                                 offset = end;
                             }
@@ -653,13 +625,13 @@ impl FieldLayout {
                 let alignment_check = if elem.align() > 1 {
                     quote! {
                         if len != 0 && data_offset % #elem_align != 0 {
-                            #pinocchio_log::log!(
+                            ::pinocchio_log::log!(
                                 "Invalid alignment for field {}: element data starts at offset {}, expected {}-byte alignment",
                                 #field_name,
                                 data_offset,
                                 #elem_align,
                             );
-                            return Err(#layout_error::InvalidFieldAlignment);
+                            return Err(::wheels::DataLayoutError::InvalidFieldAlignment);
                         }
                     }
                 } else {
@@ -670,21 +642,21 @@ impl FieldLayout {
                     let data_offset = match offset.checked_add(#len_width_lit) {
                         core::option::Option::Some(data_offset) => data_offset,
                         core::option::Option::None => {
-                            #pinocchio_log::log!(
+                            ::pinocchio_log::log!(
                                 "Missing length header for field {} at offset {}",
                                 #field_name,
                                 offset,
                             );
-                            return Err(#layout_error::MissingLengthHeader);
+                            return Err(::wheels::DataLayoutError::MissingLengthHeader);
                         }
                     };
                     if data_offset > bytes.len() {
-                        #pinocchio_log::log!(
+                        ::pinocchio_log::log!(
                             "Missing length header for field {} at offset {}",
                             #field_name,
                             offset,
                         );
-                        return Err(#layout_error::MissingLengthHeader);
+                        return Err(::wheels::DataLayoutError::MissingLengthHeader);
                     }
 
                     let len = #len_expr;
@@ -693,32 +665,32 @@ impl FieldLayout {
                     let payload_len = match len.checked_mul(#elem_size) {
                         core::option::Option::Some(payload_len) => payload_len,
                         core::option::Option::None => {
-                            #pinocchio_log::log!(
+                            ::pinocchio_log::log!(
                                 "Truncated Vec payload for field {}: len {} overflows payload size",
                                 #field_name,
                                 len,
                             );
-                            return Err(#layout_error::TruncatedVectorPayload);
+                            return Err(::wheels::DataLayoutError::TruncatedVectorPayload);
                         }
                     };
                     let end = match data_offset.checked_add(payload_len) {
                         core::option::Option::Some(end) => end,
                         core::option::Option::None => {
-                            #pinocchio_log::log!(
+                            ::pinocchio_log::log!(
                                 "Truncated Vec payload for field {}: payload end overflows usize",
                                 #field_name,
                             );
-                            return Err(#layout_error::TruncatedVectorPayload);
+                            return Err(::wheels::DataLayoutError::TruncatedVectorPayload);
                         }
                     };
                     if end > bytes.len() {
-                        #pinocchio_log::log!(
+                        ::pinocchio_log::log!(
                             "Truncated Vec payload for field {}: need {} bytes, have {}",
                             #field_name,
                             end,
                             bytes.len(),
                         );
-                        return Err(#layout_error::TruncatedVectorPayload);
+                        return Err(::wheels::DataLayoutError::TruncatedVectorPayload);
                     }
 
                     offset = end;
@@ -728,7 +700,6 @@ impl FieldLayout {
     }
 
     fn gen_field_encode_step(&self, field_ident: &Ident) -> proc_macro2::TokenStream {
-        let bytemuck = bytemuck_path();
         match self {
             Self::Value { value, optional } => {
                 let value_size = usize_lit(value.size());
@@ -740,7 +711,7 @@ impl FieldLayout {
                         },
                         _ => quote! {
                             bytes[offset..offset + #value_size]
-                                .copy_from_slice(#bytemuck::bytes_of(&self.#field_ident));
+                                .copy_from_slice(::bytemuck::bytes_of(&self.#field_ident));
                             offset += #value_size;
                         },
                     },
@@ -759,7 +730,7 @@ impl FieldLayout {
                             if let core::option::Option::Some(value) = &self.#field_ident {
                                 bytes[offset] = 1;
                                 bytes[offset + 1..offset + 1 + #value_size]
-                                    .copy_from_slice(#bytemuck::bytes_of(value));
+                                    .copy_from_slice(::bytemuck::bytes_of(value));
                                 offset += 1 + #value_size;
                             } else {
                                 bytes[offset] = 0;
@@ -777,7 +748,7 @@ impl FieldLayout {
                         _ => quote! {
                             if let core::option::Option::Some(value) = &self.#field_ident {
                                 bytes[offset..offset + #value_size]
-                                    .copy_from_slice(#bytemuck::bytes_of(value));
+                                    .copy_from_slice(::bytemuck::bytes_of(value));
                                 offset += #value_size;
                             }
                         },
@@ -802,7 +773,7 @@ impl FieldLayout {
                         .expect("encoded length validated");
                     if field_len != 0 {
                         bytes[start..end]
-                            .copy_from_slice(#bytemuck::cast_slice(self.#field_ident.as_slice()));
+                            .copy_from_slice(::bytemuck::cast_slice(self.#field_ident.as_slice()));
                     }
                     offset = end;
                 }
@@ -811,12 +782,11 @@ impl FieldLayout {
     }
 
     fn bound(&self) -> Option<proc_macro2::TokenStream> {
-        let bytemuck = bytemuck_path();
         match self {
             Self::Value { value, .. } => {
                 if value.needs_pod_bound() {
                     let ty = value.ty();
-                    Some(quote!(#ty: #bytemuck::Pod))
+                    Some(quote!(#ty: ::bytemuck::Pod))
                 } else {
                     None
                 }
@@ -824,7 +794,7 @@ impl FieldLayout {
             Self::Vec { elem, .. } => {
                 if elem.needs_pod_bound() {
                     let ty = elem.ty();
-                    Some(quote!(#ty: #bytemuck::Pod))
+                    Some(quote!(#ty: ::bytemuck::Pod))
                 } else {
                     None
                 }
@@ -1052,7 +1022,6 @@ impl FieldLayout {
         field_ident: &Ident,
         field_offsets: &[FieldOffset],
     ) -> syn::Result<proc_macro2::TokenStream> {
-        let bytemuck = bytemuck_path();
         match self {
             Self::Value { value, optional } => {
                 let ty = value.ty();
@@ -1068,7 +1037,7 @@ impl FieldLayout {
 
                 let return_expr = match access_mode {
                     AccessMode::Copy => read_copy_expr(value, slice_expr)?,
-                    AccessMode::Ref => quote!(#bytemuck::from_bytes::<#ty>(#slice_expr)),
+                    AccessMode::Ref => quote!(::bytemuck::from_bytes::<#ty>(#slice_expr)),
                 };
 
                 match (*optional, access_mode) {
@@ -1139,7 +1108,7 @@ impl FieldLayout {
                         }
                         let start = offset + #len_width_lit;
                         let end = start + len * #elem_size;
-                        #bytemuck::cast_slice::<u8, #elem_ty>(&self.bytes[start..end])
+                        ::bytemuck::cast_slice::<u8, #elem_ty>(&self.bytes[start..end])
                     }
                 })
             }
@@ -1501,8 +1470,6 @@ fn implicit_len_validation(
     fields: &syn::punctuated::Punctuated<syn::Field, Token![,]>,
     layouts: &[FieldLayout],
 ) -> syn::Result<proc_macro2::TokenStream> {
-    let pinocchio_log = pinocchio_log_path();
-    let layout_error = layout_error_ty();
     let len_map = implicit_len_map(fields, layouts, min_datalen)?;
     if len_map.is_empty() {
         return Ok(quote!());
@@ -1515,13 +1482,13 @@ fn implicit_len_validation(
 
     Ok(quote! {
         if #struct_name::__implicit_option_mask_for_len(bytes.len()).is_none() {
-            #pinocchio_log::log!(
+            ::pinocchio_log::log!(
                 "Invalid implicit Option encoding for {}: len {} is not one of {}",
                 stringify!(#struct_name),
                 bytes.len(),
                 #valid_lens,
             );
-            return Err(#layout_error::InvalidImplicitOptionEncoding);
+            return Err(::wheels::DataLayoutError::InvalidImplicitOptionEncoding);
         }
     })
 }
@@ -1590,8 +1557,6 @@ fn data_len_validation(
     struct_name: &Ident,
     layouts: &[FieldLayout],
 ) -> syn::Result<proc_macro2::TokenStream> {
-    let pinocchio_log = pinocchio_log_path();
-    let layout_error = layout_error_ty();
     if let Some(exact_lens) = exact_data_lens(layouts) {
         if exact_lens.len() == 1 {
             let msg = format!(
@@ -1600,8 +1565,8 @@ fn data_len_validation(
             );
             return Ok(quote! {
                 if bytes.len() != Self::DATA_LEN {
-                    #pinocchio_log::log!(#msg, bytes.len());
-                    return Err(#layout_error::InvalidDataLength);
+                    ::pinocchio_log::log!(#msg, bytes.len());
+                    return Err(::wheels::DataLayoutError::InvalidDataLength);
                 }
             });
         }
@@ -1610,27 +1575,27 @@ fn data_len_validation(
         let len_patterns = exact_lens.iter().map(|len| usize_lit(*len));
         return Ok(quote! {
             if !matches!(bytes.len(), #(#len_patterns)|*) {
-                #pinocchio_log::log!(
+                ::pinocchio_log::log!(
                     "bytes [len={}] cannot be deserialized to {} which needs one of {} bytes",
                     bytes.len(),
                     stringify!(#struct_name),
                     #valid_lens,
                 );
-                return Err(#layout_error::InvalidDataLength);
+                return Err(::wheels::DataLayoutError::InvalidDataLength);
             }
         });
     }
 
     Ok(quote! {
         if bytes.len() < Self::__MIN_DATA_LEN || bytes.len() > Self::__MAX_DATA_LEN {
-            #pinocchio_log::log!(
+            ::pinocchio_log::log!(
                 "bytes [len={}] cannot be deserialized to {} which needs at least {} and at most {} bytes",
                 bytes.len(),
                 stringify!(#struct_name),
                 Self::__MIN_DATA_LEN,
                 Self::__MAX_DATA_LEN,
             );
-            return Err(#layout_error::InvalidDataLength);
+            return Err(::wheels::DataLayoutError::InvalidDataLength);
         }
     })
 }
@@ -1930,17 +1895,14 @@ struct Flexible {
 
 impl Flexible {
     fn capacity(self) -> usize {
-        let bits = self.len_width.saturating_mul(8);
-        if bits >= usize::BITS as usize {
-            usize::MAX
-        } else {
-            (1usize << bits) - 1
+        match self.len_width {
+            8 => u32::MAX as usize,
+            _ => (1usize << (self.len_width * 8)) - 1,
         }
     }
 
     fn max_slot_len(self, elem_size: usize) -> usize {
-        self.len_width
-            .saturating_add(elem_size.saturating_mul(self.capacity()))
+        self.len_width + elem_size * self.capacity()
     }
 }
 

@@ -1,7 +1,5 @@
 #![no_std]
 
-pub extern crate alloc;
-
 pub use wheels_macros::data_layout;
 
 pub type Result<T> = core::result::Result<T, DataLayoutError>;
@@ -101,11 +99,3 @@ impl core::fmt::Display for DataLayoutError {
 }
 
 impl core::error::Error for DataLayoutError {}
-
-#[doc(hidden)]
-pub mod __private {
-    pub use crate::alloc;
-    pub use bytemuck;
-    pub use pinocchio;
-    pub use pinocchio_log;
-}

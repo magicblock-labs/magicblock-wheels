@@ -2,7 +2,6 @@ use proc_macro::TokenStream;
 use syn::{parse_macro_input, ItemStruct};
 
 mod data_layout;
-mod runtime;
 
 ///
 /// Usage
@@ -29,6 +28,9 @@ mod runtime;
 /// }
 ///
 /// ```
+///
+/// The generated code refers directly to `::wheels`, `::alloc`, `::bytemuck`, and `::pinocchio_log`.
+/// In `no_std` crates, bring `alloc` into scope with `extern crate alloc;`.
 ///
 /// Attributes
 /// ==========
@@ -123,8 +125,8 @@ mod runtime;
 ///     `N` must be in `1..=8`.
 ///
 ///     Length is encoded as an unsigned little-endian integer stored in those
-///     `N` bytes. The effective maximum supported length is therefore bounded by
-///     both that integer width and the current target's `usize`.
+///     `N` bytes. For `N = 8`, the supported Vec length is still capped at
+///     `u32::MAX`.
 ///
 /// APIs
 /// ====
