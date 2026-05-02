@@ -8,7 +8,7 @@ mod runtime;
 ///
 /// Notes:
 /// - Requires `buffer_offset = 0..7`.
-/// - `Vec<T>` fields use `#[flexible = 1]` or `#[flexible = 2]`.
+/// - `Vec<T>` fields use `#[flexible = N]` where `N` is in `1..=8`.
 /// - `option = implicit` enables tagless `Option<T>` encoding when there are
 ///   no `Vec` fields and option payload sizes have unique subset sums.
 /// - `bool` and `Option<bool>` are supported; `Vec<bool>` is not.

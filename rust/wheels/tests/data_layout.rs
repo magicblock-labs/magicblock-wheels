@@ -210,6 +210,71 @@ fn variable_layout_encode_to_rejects_small_output_buffer() {
     );
 }
 
+#[data_layout(buffer_offset = 0)]
+struct FourByteFlexibleArgs {
+    header: u16,
+    #[flexible = 4]
+    payload: Vec<u16>,
+    checksum: u32,
+}
+
+#[test]
+fn data_layout_supports_four_byte_length_prefixes() {
+    let mut aligned = Aligned([0; 16]);
+    let bytes = &mut aligned.0;
+
+    bytes[0..2].copy_from_slice(&7_u16.to_le_bytes());
+    bytes[2..6].copy_from_slice(&3_u32.to_le_bytes());
+    bytes[6..12].copy_from_slice(&[11, 0, 12, 0, 13, 0]);
+    bytes[12..16].copy_from_slice(&99_u32.to_le_bytes());
+
+    let view = FourByteFlexibleArgs::decode(bytes).unwrap();
+    assert_eq!(view.header(), 7);
+    assert_eq!(view.payload(), &[11, 12, 13]);
+    assert_eq!(view.checksum(), 99);
+
+    let value = FourByteFlexibleArgs {
+        header: 7,
+        payload: vec![11, 12, 13],
+        checksum: 99,
+    };
+    assert_eq!(value.encode().unwrap(), bytes.to_vec());
+}
+
+#[data_layout(buffer_offset = 0)]
+struct EightByteFlexibleArgs {
+    tag: u8,
+    #[flexible = 8]
+    payload: Vec<u8>,
+    checksum: u16,
+}
+
+#[test]
+fn data_layout_supports_eight_byte_length_prefixes() {
+    assert_eq!(EightByteFlexibleArgs::DATA_LEN_RANGE.0, 11);
+    assert_eq!(EightByteFlexibleArgs::DATA_LEN_RANGE.1, usize::MAX);
+
+    let mut aligned = Aligned([0; 18]);
+    let bytes = &mut aligned.0;
+
+    bytes[0] = 9;
+    bytes[1..9].copy_from_slice(&5_u64.to_le_bytes());
+    bytes[9..14].copy_from_slice(&[1, 2, 3, 4, 5]);
+    bytes[14..16].copy_from_slice(&0xBEEF_u16.to_le_bytes());
+
+    let view = EightByteFlexibleArgs::decode(&bytes[..16]).unwrap();
+    assert_eq!(view.tag(), 9);
+    assert_eq!(view.payload(), &[1, 2, 3, 4, 5]);
+    assert_eq!(view.checksum(), 0xBEEF);
+
+    let value = EightByteFlexibleArgs {
+        tag: 9,
+        payload: vec![1, 2, 3, 4, 5],
+        checksum: 0xBEEF,
+    };
+    assert_eq!(value.encode().unwrap(), bytes[..16].to_vec());
+}
+
 #[test]
 fn variable_layout_encode_rejects_vec_len_that_exceeds_len_width() {
     let value = PrivateTransferArgs {
