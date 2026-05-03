@@ -1,22 +1,30 @@
-const DATALAYOUT_ERROR_BASE: u32 = 0x4D42_0000;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum DataLayoutError {
-    InvalidDataLength = DATALAYOUT_ERROR_BASE + 1,
-    InvalidBufferOffset = DATALAYOUT_ERROR_BASE + 2,
-    InvalidOptionTag = DATALAYOUT_ERROR_BASE + 3,
-    LengthExceedsCapacity = DATALAYOUT_ERROR_BASE + 4,
-    OutputBufferTooSmall = DATALAYOUT_ERROR_BASE + 5,
-    MissingOptionTag = DATALAYOUT_ERROR_BASE + 6,
-    TruncatedPayload = DATALAYOUT_ERROR_BASE + 7,
-    InvalidFieldAlignment = DATALAYOUT_ERROR_BASE + 8,
-    MissingLengthHeader = DATALAYOUT_ERROR_BASE + 9,
-    TruncatedVectorPayload = DATALAYOUT_ERROR_BASE + 10,
-    InvalidImplicitOptionEncoding = DATALAYOUT_ERROR_BASE + 11,
+    InvalidDataLength = DataLayoutError::MIN + 0,
+    InvalidBufferOffset = DataLayoutError::MIN + 1,
+    InvalidOptionTag = DataLayoutError::MIN + 2,
+    LengthExceedsCapacity = DataLayoutError::MIN + 3,
+    OutputBufferTooSmall = DataLayoutError::MIN + 4,
+    MissingOptionTag = DataLayoutError::MIN + 5,
+    TruncatedPayload = DataLayoutError::MIN + 6,
+    InvalidFieldAlignment = DataLayoutError::MIN + 7,
+    MissingLengthHeader = DataLayoutError::MIN + 8,
+    TruncatedVectorPayload = DataLayoutError::MIN + 9,
+    InvalidImplicitOptionEncoding = DataLayoutError::MIN + 10,
 }
 
 impl DataLayoutError {
+    ///
+    /// 0x444C stands for DL (DataLayout).
+    ///
+    /// >> println!("{:X}", u32::from_be_bytes(*b"DL\0\0"));
+    ///
+    /// 0x444C0000
+    ///
+    pub const MIN: u32 = 0x444C0000;
+    pub const MAX: u32 = 0x444C00FF;
+
     pub const fn code(self) -> u32 {
         self as u32
     }
