@@ -1,5 +1,9 @@
 #![no_std]
 
+pub extern crate alloc;
+
+pub mod layout;
+
 pub use wheels_macros::data_layout;
 
 pub type Result<T> = core::result::Result<T, DataLayoutError>;
