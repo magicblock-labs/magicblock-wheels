@@ -5,12 +5,18 @@ pub trait DataLayoutKind {
 }
 
 pub trait Encodable {
-    fn encode(&self) -> Result<alloc::vec::Vec<u8>, DataLayoutError>;
+    fn encoded_len(&self) -> Result<usize, DataLayoutError>;
+
+    fn encode(&self) -> Result<alloc::vec::Vec<u8>, DataLayoutError> {
+        let mut bytes = ::alloc::vec![0; self.encoded_len()?];
+        self.encode_to(&mut bytes)?;
+        Ok(bytes)
+    }
 
     ///
     /// Returns the unwritten buffer
     ///
-    fn encode_to(&self, out: &mut [u8]) -> Result<&mut [u8], DataLayoutError>;
+    fn encode_to<'a>(&self, out: &'a mut [u8]) -> Result<&'a mut [u8], DataLayoutError>;
 }
 
 pub trait Decodable {

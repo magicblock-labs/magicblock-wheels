@@ -2,7 +2,7 @@ extern crate alloc;
 
 use pinocchio::error::ProgramError;
 use wheels::data_layout;
-use wheels::DataLayoutError;
+use wheels::{layout::Encodable, DataLayoutError};
 
 #[repr(align(8))]
 struct Aligned<const N: usize>([u8; N]);

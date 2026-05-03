@@ -156,32 +156,6 @@ pub(crate) fn expand_data_layout(
                 Ok(#view_name { bytes })
             }
 
-            pub fn encode_to(
-                &self,
-                bytes: &mut [u8],
-            ) -> core::result::Result<(), ::wheels::DataLayoutError> {
-                let encoded_len = self.__encoded_len()?;
-                if bytes.len() < encoded_len {
-                    ::pinocchio_log::log!(
-                        "bytes [len={}] are too small to encode {} which needs {} bytes",
-                        bytes.len(),
-                        stringify!(#struct_name),
-                        encoded_len,
-                    );
-                    return Err(::wheels::DataLayoutError::OutputBufferTooSmall);
-                }
-
-                let mut offset = 0usize;
-                #(#encode_steps)*
-                Ok(())
-            }
-
-            pub fn encode(&self) -> core::result::Result<::alloc::vec::Vec<u8>, ::wheels::DataLayoutError> {
-                let mut bytes = ::alloc::vec![0; self.__encoded_len()?];
-                self.encode_to(&mut bytes)?;
-                Ok(bytes)
-            }
-
             fn __validate_bytes(
                 bytes: &[u8],
             ) -> core::result::Result<(), ::wheels::DataLayoutError> {
@@ -204,14 +178,6 @@ pub(crate) fn expand_data_layout(
                 #(#validate_steps)*
 
                 Ok(())
-            }
-
-            fn __encoded_len(
-                &self,
-            ) -> core::result::Result<usize, ::wheels::DataLayoutError> {
-                let mut len = 0usize;
-                #(#encoded_len_steps)*
-                Ok(len)
             }
 
             fn __read_len_header_unchecked(
@@ -262,6 +228,38 @@ pub(crate) fn expand_data_layout(
             }
 
             #implicit_len_helpers
+        }
+
+        impl ::wheels::layout::Encodable for #struct_name {
+
+            fn encoded_len(
+                &self,
+            ) -> core::result::Result<usize, ::wheels::DataLayoutError> {
+                let mut len = 0usize;
+                #(#encoded_len_steps)*
+                Ok(len)
+            }
+
+            fn encode_to<'a>(
+                &self,
+                bytes: &'a mut [u8],
+            ) -> core::result::Result<&'a mut [u8], ::wheels::DataLayoutError> {
+                let encoded_len = self.encoded_len()?;
+                if bytes.len() < encoded_len {
+                    ::pinocchio_log::log!(
+                        "bytes [len={}] are too small to encode {} which needs {} bytes",
+                        bytes.len(),
+                        stringify!(#struct_name),
+                        encoded_len,
+                    );
+                    return Err(::wheels::DataLayoutError::OutputBufferTooSmall);
+                }
+                let (bytes, remaining) = bytes.split_at_mut(encoded_len);
+
+                let mut offset = 0usize;
+                #(#encode_steps)*
+                Ok(remaining)
+            }
         }
 
         #[allow(dead_code)]
