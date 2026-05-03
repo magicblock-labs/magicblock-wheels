@@ -22,7 +22,9 @@ pub trait Encodable {
 pub trait Decodable {
     type View<'a>;
 
-    fn decode<'a>(bytes: &'a [u8]) -> Result<Self::View<'a>, DataLayoutError>;
+    fn decode<'a>(bytes: &'a [u8]) -> Result<Self::View<'a>, DataLayoutError> {
+        Ok(Self::decode_prefix(bytes)?.0)
+    }
 
     ///
     /// Decodes a prefix and returns the remaining bytes

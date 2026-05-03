@@ -149,13 +149,6 @@ pub(crate) fn expand_data_layout(
 
             #public_len_const
 
-            pub fn decode(
-                bytes: &[u8],
-            ) -> core::result::Result<#view_name<'_>, ::wheels::DataLayoutError> {
-                Self::__validate_bytes(bytes)?;
-                Ok(#view_name { bytes })
-            }
-
             fn __validate_bytes(
                 bytes: &[u8],
             ) -> core::result::Result<(), ::wheels::DataLayoutError> {
@@ -259,6 +252,17 @@ pub(crate) fn expand_data_layout(
                 let mut offset = 0usize;
                 #(#encode_steps)*
                 Ok(remaining)
+            }
+        }
+
+        impl ::wheels::layout::Decodable for #struct_name {
+            type View<'a> = #view_name<'a>;
+
+            fn decode_prefix<'a>(
+                bytes: &'a [u8]
+            ) -> core::result::Result<(Self::View<'a>, &'a [u8]), ::wheels::DataLayoutError> {
+                Self::__validate_bytes(bytes)?;
+                Ok((#view_name { bytes }, bytes))
             }
         }
 
