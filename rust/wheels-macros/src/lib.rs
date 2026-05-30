@@ -1,6 +1,7 @@
 use proc_macro::TokenStream;
 use syn::{parse_macro_input, ItemStruct};
 
+mod common;
 mod fixed_offset_layout;
 mod variable_offset_layout;
 

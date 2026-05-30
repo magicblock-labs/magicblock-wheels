@@ -1,11 +1,16 @@
-use proc_macro2::Span;
-use quote::{format_ident, quote, ToTokens};
-use syn::{
-    spanned::Spanned, Attribute, Expr, ExprLit, Fields, GenericArgument, Ident, ItemStruct, Lit,
-    LitInt, PathArguments, Type, TypePath,
+use crate::common::{
+    ensure_allow_dead_code, impl_where_clause, is_bool, is_string, option_inner, parse_value_kind,
+    read_copy_expr, strip_field_attr, usize_lit, vec_inner, AccessMode, FixedValueKind,
 };
+use proc_macro2::Span;
+use quote::{format_ident, quote};
+use syn::{spanned::Spanned, Expr, ExprLit, Fields, Ident, ItemStruct, Lit, LitInt, Type};
 
 const FIELD_ATTRIBUTES: &[&str] = &["capacity", "flexible"];
+const LAYOUT_NAME: &str = "fixed_offset_layout";
+const UNSUPPORTED_FIELD_MESSAGE: &str =
+    "fixed_offset_layout fields must be bool, Pubkey, integer primitives, or fixed-size arrays";
+const INTEGER_FIELD_MESSAGE: &str = "field must be an integer primitive";
 
 // [capacity = flexible] array-len is always encoded as 2-bytes
 const MAX_LEN_WIDTH: usize = 2;
@@ -55,7 +60,7 @@ pub(crate) fn expand_fixed_offset_layout(
 
         let layout = parse_field_layout(field, is_last_field)?;
 
-        strip_field_attr(&mut field.attrs);
+        strip_field_attr(&mut field.attrs, FIELD_ATTRIBUTES);
 
         match layout.check_ref_alignment(offset, field_ident) {
             Ok(Some(issue)) => {
@@ -285,66 +290,6 @@ pub(crate) fn expand_fixed_offset_layout(
             #(#view_methods)*
         }
     })
-}
-
-enum AccessMode {
-    Copy,
-    Ref,
-}
-
-enum FixedValueKind {
-    Bool { ty: Type },
-    Integer { ty: Type, size: usize, align: usize },
-    Pubkey { ty: Type },
-    Array { ty: Type, size: usize, align: usize },
-}
-
-impl FixedValueKind {
-    fn ty(&self) -> &Type {
-        match self {
-            Self::Bool { ty }
-            | Self::Integer { ty, .. }
-            | Self::Pubkey { ty }
-            | Self::Array { ty, .. } => ty,
-        }
-    }
-
-    fn size(&self) -> usize {
-        match self {
-            Self::Bool { .. } => 1,
-            Self::Pubkey { .. } => 32,
-            Self::Integer { size, .. } | Self::Array { size, .. } => *size,
-        }
-    }
-
-    fn align(&self) -> usize {
-        match self {
-            Self::Bool { .. } | Self::Pubkey { .. } => 1,
-            Self::Integer { align, .. } | Self::Array { align, .. } => *align,
-        }
-    }
-
-    fn access_mode(&self) -> AccessMode {
-        if self.size() > 8 {
-            AccessMode::Ref
-        } else {
-            AccessMode::Copy
-        }
-    }
-
-    fn needs_pod_bound(&self) -> bool {
-        matches!(self, Self::Pubkey { .. } | Self::Array { .. })
-    }
-
-    fn size_expr(&self) -> proc_macro2::TokenStream {
-        match self {
-            Self::Pubkey { .. } => quote!(32usize),
-            _ => {
-                let ty = self.ty();
-                quote!(core::mem::size_of::<#ty>())
-            }
-        }
-    }
 }
 
 ///
@@ -755,7 +700,7 @@ fn parse_field_layout(field: &syn::Field, is_last_field: bool) -> syn::Result<Fi
     let ty = &field.ty;
     let attribute = parse_field_attr(field, is_last_field)?;
 
-    if let Some(elem_ty) = vec_inner(ty)? {
+    if let Some(elem_ty) = vec_inner(ty, LAYOUT_NAME)? {
         if is_bool(elem_ty) {
             return Err(syn::Error::new_spanned(
                 field,
@@ -779,7 +724,7 @@ fn parse_field_layout(field: &syn::Field, is_last_field: bool) -> syn::Result<Fi
             }
         };
         return Ok(FixedFieldKind::Vec {
-            elem: parse_value_kind(elem_ty)?,
+            elem: parse_value_kind(elem_ty, UNSUPPORTED_FIELD_MESSAGE)?,
             capacity,
         });
     }
@@ -798,7 +743,7 @@ fn parse_field_layout(field: &syn::Field, is_last_field: bool) -> syn::Result<Fi
             .transpose()?
             .unwrap_or(Optional::Fixed);
 
-        if vec_inner(inner)?.is_some() {
+        if vec_inner(inner, LAYOUT_NAME)?.is_some() {
             return Err(syn::Error::new_spanned(
                 field,
                 "Option<Vec<T>> is not supported in fixed_offset_layout",
@@ -812,7 +757,7 @@ fn parse_field_layout(field: &syn::Field, is_last_field: bool) -> syn::Result<Fi
         }
 
         return Ok(FixedFieldKind::Value {
-            value: parse_value_kind(inner)?,
+            value: parse_value_kind(inner, UNSUPPORTED_FIELD_MESSAGE)?,
             optional: Some(optional),
         });
     }
@@ -832,57 +777,9 @@ fn parse_field_layout(field: &syn::Field, is_last_field: bool) -> syn::Result<Fi
     }
 
     Ok(FixedFieldKind::Value {
-        value: parse_value_kind(ty)?,
+        value: parse_value_kind(ty, UNSUPPORTED_FIELD_MESSAGE)?,
         optional: None,
     })
-}
-
-fn parse_value_kind(ty: &Type) -> syn::Result<FixedValueKind> {
-    if is_bool(ty) {
-        return Ok(FixedValueKind::Bool { ty: ty.clone() });
-    }
-
-    if is_pubkey(ty) {
-        return Ok(FixedValueKind::Pubkey { ty: ty.clone() });
-    }
-
-    if let Some((size, align)) = integer_size_and_align(ty) {
-        return Ok(FixedValueKind::Integer {
-            ty: ty.clone(),
-            size,
-            align,
-        });
-    }
-
-    let (size, align) = fixed_array_size_and_align(ty)?;
-    Ok(FixedValueKind::Array {
-        ty: ty.clone(),
-        size,
-        align,
-    })
-}
-
-fn ensure_allow_dead_code(attrs: &mut Vec<Attribute>) {
-    if attrs.iter().any(is_allow_dead_code) {
-        return;
-    }
-
-    attrs.push(syn::parse_quote!(#[allow(dead_code)]));
-}
-
-fn is_allow_dead_code(attr: &Attribute) -> bool {
-    if !attr.path().is_ident("allow") {
-        return false;
-    }
-
-    let mut found = false;
-    let _ = attr.parse_nested_meta(|meta| {
-        if meta.path.is_ident("dead_code") {
-            found = true;
-        }
-        Ok(())
-    });
-    found
 }
 
 fn parse_args(attr: &str) -> syn::Result<()> {
@@ -893,18 +790,6 @@ fn parse_args(attr: &str) -> syn::Result<()> {
             "fixed_offset_layout does not support parameters",
         )),
     }
-}
-
-fn impl_where_clause(bounds: &[proc_macro2::TokenStream]) -> proc_macro2::TokenStream {
-    if bounds.is_empty() {
-        quote!()
-    } else {
-        quote!(where #(#bounds,)*)
-    }
-}
-
-fn strip_field_attr(attrs: &mut Vec<Attribute>) {
-    attrs.retain(|attr| !FIELD_ATTRIBUTES.iter().any(|a| attr.path().is_ident(a)));
 }
 
 #[derive(Copy, Clone)]
@@ -1057,112 +942,6 @@ fn parse_field_attr(
     }
 }
 
-fn option_inner(ty: &Type) -> Option<&Type> {
-    let Type::Path(TypePath { path, .. }) = ty else {
-        return None;
-    };
-    let segment = path.segments.last()?;
-    if segment.ident != "Option" {
-        return None;
-    }
-    let PathArguments::AngleBracketed(args) = &segment.arguments else {
-        return None;
-    };
-    let GenericArgument::Type(inner) = args.args.first()? else {
-        return None;
-    };
-    Some(inner)
-}
-
-fn vec_inner(ty: &Type) -> syn::Result<Option<&Type>> {
-    let Type::Path(TypePath { path, .. }) = ty else {
-        return Ok(None);
-    };
-    let Some(segment) = path.segments.last() else {
-        return Ok(None);
-    };
-    if segment.ident != "Vec" {
-        return Ok(None);
-    }
-    let PathArguments::AngleBracketed(args) = &segment.arguments else {
-        return Err(syn::Error::new_spanned(
-            &segment.arguments,
-            "Vec requires exactly one type argument in fixed_offset_layout: Vec<T>",
-        ));
-    };
-    if args.args.len() != 1 {
-        return Err(syn::Error::new_spanned(
-            args,
-            "Vec requires exactly one type argument in fixed_offset_layout: Vec<T>",
-        ));
-    }
-
-    let Some(GenericArgument::Type(elem_ty)) = args.args.first() else {
-        return Err(syn::Error::new_spanned(args, "Vec element must be a type"));
-    };
-
-    Ok(Some(elem_ty))
-}
-
-fn integer_primitive_name(ty: &Type) -> Option<String> {
-    let Type::Path(type_path) = ty else {
-        return None;
-    };
-    if type_path.qself.is_some() || type_path.path.segments.len() != 1 {
-        return None;
-    }
-    let ident = type_path.path.segments[0].ident.to_string();
-    match ident.as_str() {
-        "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "i64" | "u64" | "i128" | "u128" | "isize"
-        | "usize" => Some(ident),
-        _ => None,
-    }
-}
-
-fn is_string(ty: &Type) -> bool {
-    let Type::Path(type_path) = ty else {
-        return false;
-    };
-    type_path.qself.is_none()
-        && type_path.path.segments.len() == 1
-        && type_path.path.segments[0].ident == "String"
-}
-
-fn is_bool(ty: &Type) -> bool {
-    let Type::Path(type_path) = ty else {
-        return false;
-    };
-    type_path.qself.is_none()
-        && type_path.path.segments.len() == 1
-        && type_path.path.segments[0].ident == "bool"
-}
-
-fn is_pubkey(ty: &Type) -> bool {
-    let Type::Path(TypePath { qself: None, path }) = ty else {
-        return false;
-    };
-
-    let mut segments = path.segments.iter();
-    let Some(first) = segments.next() else {
-        return false;
-    };
-    let second = segments.next();
-    if segments.next().is_some() {
-        return false;
-    }
-
-    if let Some(second) = second {
-        return (first.ident == "wheels" && second.ident == "Pubkey")
-            || (first.ident == "pinocchio" && second.ident == "Address");
-    }
-
-    first.ident == "Pubkey" || first.ident == "Address"
-}
-
-fn usize_lit(value: usize) -> LitInt {
-    LitInt::new(&value.to_string(), Span::call_site())
-}
-
 fn accessor_ident(field_ident: &Ident) -> Ident {
     let field_name = field_ident.to_string();
     let trimmed = field_name.trim_start_matches('_');
@@ -1179,95 +958,11 @@ fn bytes_slice_expr(offset: usize, len: usize) -> proc_macro2::TokenStream {
     quote!(&self.bytes[#offset..#offset + #len])
 }
 
-fn parse_integer_expr(
-    ty: &Type,
-    bytes_expr: proc_macro2::TokenStream,
-) -> syn::Result<proc_macro2::TokenStream> {
-    let Some(name) = integer_primitive_name(ty) else {
-        return Err(syn::Error::new_spanned(
-            ty,
-            "field must be an integer primitive",
-        ));
-    };
-    let ty_tokens = ty.to_token_stream();
-    Ok(match name.as_str() {
-        "i8" => quote!(i8::from_le_bytes([(#bytes_expr)[0]])),
-        "u8" => quote!(u8::from_le_bytes([(#bytes_expr)[0]])),
-        _ => quote!({
-            let raw: [u8; core::mem::size_of::<#ty_tokens>()] = (#bytes_expr)
-                .try_into()
-                .expect("validated slice length");
-            <#ty_tokens>::from_le_bytes(raw)
-        }),
-    })
-}
-
-fn integer_size_and_align(ty: &Type) -> Option<(usize, usize)> {
-    match integer_primitive_name(ty).as_deref() {
-        Some("i8" | "u8") => Some((1, 1)),
-        Some("i16" | "u16") => Some((2, 2)),
-        Some("i32" | "u32") => Some((4, 4)),
-        Some("i64" | "u64") => Some((8, 8)),
-        Some("i128" | "u128") => Some((16, 16)),
-        Some("isize" | "usize") => {
-            let size = core::mem::size_of::<usize>();
-            Some((size, size))
-        }
-        _ => None,
-    }
-}
-
-fn fixed_array_size_and_align(ty: &Type) -> syn::Result<(usize, usize)> {
-    let Type::Array(array) = ty else {
-        return Err(syn::Error::new_spanned(
-            ty,
-            "fixed_offset_layout fields must be bool, Pubkey, integer primitives, or fixed-size arrays",
-        ));
-    };
-
-    let Expr::Lit(ExprLit {
-        lit: Lit::Int(len_lit),
-        ..
-    }) = &array.len
-    else {
-        return Err(syn::Error::new_spanned(
-            &array.len,
-            "array length must be an integer literal",
-        ));
-    };
-
-    let len = len_lit.base10_parse::<usize>()?;
-    let (elem_size, elem_align) = if let Some(size_align) = integer_size_and_align(&array.elem) {
-        size_align
-    } else {
-        fixed_array_size_and_align(&array.elem)?
-    };
-
-    Ok((len * elem_size, elem_align))
-}
-
-fn read_copy_expr(
-    value: &FixedValueKind,
-    bytes_expr: proc_macro2::TokenStream,
-) -> syn::Result<proc_macro2::TokenStream> {
-    match value {
-        FixedValueKind::Bool { .. } => Ok(quote!((#bytes_expr)[0] != 0)),
-        FixedValueKind::Integer { ty, .. } => parse_integer_expr(ty, bytes_expr),
-        FixedValueKind::Array { ty, .. } => Ok(quote! {
-            unsafe { core::ptr::read_unaligned((#bytes_expr).as_ptr().cast::<#ty>()) }
-        }),
-        FixedValueKind::Pubkey { .. } => Err(syn::Error::new_spanned(
-            value.ty(),
-            "Pubkey fields are borrowed by fixed_offset_layout",
-        )),
-    }
-}
-
 fn getter_tokens(value: &FixedValueKind, offset: usize) -> syn::Result<proc_macro2::TokenStream> {
     let ty = value.ty();
     let slice_expr = bytes_slice_expr(offset, value.size());
     match value.access_mode() {
-        AccessMode::Copy => read_copy_expr(value, slice_expr),
+        AccessMode::Copy => read_copy_expr(value, slice_expr, LAYOUT_NAME, INTEGER_FIELD_MESSAGE),
         AccessMode::Ref => Ok(borrow_ref_expr(ty, slice_expr)),
     }
 }
