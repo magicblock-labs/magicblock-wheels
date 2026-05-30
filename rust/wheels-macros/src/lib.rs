@@ -1,7 +1,26 @@
 use proc_macro::TokenStream;
 use syn::{parse_macro_input, ItemStruct};
 
+mod fixed_offset_layout;
 mod variable_offset_layout;
+
+///
+/// Fixed-offset layout with capacity-reserved variable fields.
+///
+/// `Vec<T>` fields use `#[capacity = N]` and reserve space for `N` elements,
+/// so later fields keep stable compile-time offsets. A final field may use
+/// `#[flexible = 1]`, `#[flexible = 2]`, or `#[flexible]` for a trailing
+/// variable-length Vec or Option.
+#[proc_macro_attribute]
+pub fn fixed_offset_layout(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let attr_string = attr.to_string();
+    let input = parse_macro_input!(item as ItemStruct);
+
+    match fixed_offset_layout::expand_fixed_offset_layout(&attr_string, &input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
 
 ///
 /// Usage
