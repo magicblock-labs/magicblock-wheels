@@ -9,4 +9,6 @@ mod requires;
 
 pub use data_layout_error::DataLayoutError;
 
+pub type Pubkey = pinocchio::Address;
+
 pub use wheels_macros::data_layout;

@@ -1,14 +1,149 @@
 extern crate alloc;
 
-use pinocchio::error::ProgramError;
+use pinocchio::{error::ProgramError, Address};
 use wheels::{
     data_layout,
     layout::{Decodable, Encodable},
-    DataLayoutError,
+    DataLayoutError, Pubkey,
 };
 
 #[repr(align(8))]
 struct Aligned<const N: usize>([u8; N]);
+
+#[data_layout(buffer_offset = 0)]
+struct PubkeyArgs {
+    payer: Address,
+    validator: Option<Pubkey>,
+    amount: u64,
+}
+
+#[data_layout(buffer_offset = 0)]
+struct RawPubkeyArgs {
+    payer: [u8; 32],
+    validator: Option<[u8; 32]>,
+    amount: u64,
+}
+
+#[test]
+fn variable_layout_supports_pubkey_fields() {
+    assert_eq!(PubkeyArgs::DATA_LENS, RawPubkeyArgs::DATA_LENS);
+    assert_eq!(PubkeyArgs::DATA_LENS, [41, 73]);
+
+    let value = PubkeyArgs {
+        payer: Pubkey::from([9; 32]),
+        validator: Some(Pubkey::from([1; 32])),
+        amount: 200,
+    };
+    let raw_value = RawPubkeyArgs {
+        payer: [9; 32],
+        validator: Some([1; 32]),
+        amount: 200,
+    };
+
+    let encoded = value.encode().unwrap();
+    assert_eq!(encoded, raw_value.encode().unwrap());
+    assert_eq!(
+        encoded,
+        [
+            [9; 32].as_slice(),
+            &[1],
+            &[1; 32],
+            200_u64.to_le_bytes().as_slice()
+        ]
+        .concat()
+    );
+
+    let view = PubkeyArgs::decode(&encoded).unwrap();
+    assert_eq!(view.payer(), &Pubkey::from([9; 32]));
+    assert_eq!(view.validator(), Some(&Pubkey::from([1; 32])));
+    assert_eq!(view.amount(), 200);
+}
+
+#[data_layout(buffer_offset = 0, option = implicit)]
+struct ImplicitPubkeyArgs {
+    shuttle_id: u32,
+    validator: Option<Pubkey>,
+    amount: u64,
+}
+
+#[test]
+fn variable_layout_supports_implicit_pubkey_option() {
+    assert_eq!(ImplicitPubkeyArgs::DATA_LENS, [12, 44]);
+
+    let none_value = ImplicitPubkeyArgs {
+        shuttle_id: 100,
+        validator: None,
+        amount: 200,
+    };
+    assert_eq!(
+        none_value.encode().unwrap(),
+        [
+            100_u32.to_le_bytes().as_slice(),
+            200_u64.to_le_bytes().as_slice(),
+        ]
+        .concat()
+    );
+
+    let some_value = ImplicitPubkeyArgs {
+        shuttle_id: 100,
+        validator: Some(Pubkey::from([1; 32])),
+        amount: 200,
+    };
+    let some_encoded = some_value.encode().unwrap();
+    assert_eq!(
+        some_encoded,
+        [
+            100_u32.to_le_bytes().as_slice(),
+            &[1; 32],
+            200_u64.to_le_bytes().as_slice(),
+        ]
+        .concat()
+    );
+
+    let view = ImplicitPubkeyArgs::decode(&some_encoded).unwrap();
+    assert_eq!(view.shuttle_id(), 100);
+    assert_eq!(view.validator(), Some(&Pubkey::from([1; 32])));
+    assert_eq!(view.amount(), 200);
+}
+
+#[data_layout(buffer_offset = 0)]
+struct PubkeyAfterVecArgs {
+    header: u16,
+    #[flexible = 1]
+    payload: Vec<u8>,
+    authority: Pubkey,
+    checksum: u16,
+}
+
+#[test]
+fn variable_layout_computes_pubkey_offset_after_variable_field() {
+    assert_eq!(PubkeyAfterVecArgs::DATA_LEN_RANGE, (37, 292));
+
+    let value = PubkeyAfterVecArgs {
+        header: 7,
+        payload: vec![1, 2, 3],
+        authority: Pubkey::from([8; 32]),
+        checksum: 0xBEEF,
+    };
+    let encoded = value.encode().unwrap();
+    assert_eq!(
+        encoded,
+        [
+            7_u16.to_le_bytes().as_slice(),
+            &[3],
+            &[1, 2, 3],
+            &[8; 32],
+            0xBEEF_u16.to_le_bytes().as_slice(),
+        ]
+        .concat()
+    );
+
+    let view = PubkeyAfterVecArgs::decode(&encoded).unwrap();
+    assert_eq!(view.header(), 7);
+    assert_eq!(view.payload(), &[1, 2, 3]);
+    assert_eq!(view.authority(), &Pubkey::from([8; 32]));
+    assert_eq!(view.checksum(), 0xBEEF);
+}
 
 #[data_layout(buffer_offset = 0)]
 struct PrivateTransferArgs {

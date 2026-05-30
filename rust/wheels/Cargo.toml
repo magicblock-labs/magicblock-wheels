@@ -7,4 +7,5 @@ edition = "2021"
 bytemuck = { version = "1", default-features = false }
 pinocchio = { version = "0.10.2", features = ["cpi"] }
 pinocchio-log = "0.5.1"
+solana-address = { version = "2", default-features = false, features = ["bytemuck"] }
 wheels-macros = { path = "../wheels-macros" }

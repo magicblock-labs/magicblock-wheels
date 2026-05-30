@@ -9,11 +9,13 @@ mod data_layout;
 ///
 /// ```ignore
 ///
+/// use wheels::Pubkey;
+///
 /// #[data_layout(buffer_offset = 1)]
 /// struct DepositAndDelegateShuttleWithPrivateTransferArgs {
 ///     shuttle_id: u32,
 ///     amount: u64,
-///     validator: Option<[u8; 32]>,
+///     validator: Option<Pubkey>,
 ///     #[flexible = 1]
 ///     encrypted_destination: Vec<u8>,
 ///     #[flexible = 2]
@@ -23,7 +25,7 @@ mod data_layout;
 /// #[data_layout(buffer_offset = 1, option = implicit)]
 /// struct DepositAndDelegateShuttleArgs {
 ///     shuttle_id: u32,
-///     validator: Option<[u8; 32]>,
+///     validator: Option<Pubkey>,
 ///     amount: u64,
 /// }
 ///
@@ -106,6 +108,10 @@ mod data_layout;
 ///     They are encoded as a single backing `u8` byte where `0` means
 ///     `false` and any non-zero byte decodes as `true`.
 ///   - `Vec<bool>` is intentionally not supported by `data_layout`
+///     because its current view API exposes borrowed slices for `Vec` fields.
+///   - Plain `Pubkey` and `Option<Pubkey>` are supported.
+///     `Pubkey` is encoded as 32 raw bytes and views return borrowed keys.
+///   - `Vec<Pubkey>` is intentionally not supported by `data_layout`
 ///     because its current view API exposes borrowed slices for `Vec` fields.
 ///
 /// Field attributes:

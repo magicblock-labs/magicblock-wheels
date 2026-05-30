@@ -330,26 +330,31 @@ enum AccessMode {
 enum FixedValueKind {
     Bool { ty: Type },
     Integer { ty: Type, size: usize, align: usize },
+    Pubkey { ty: Type },
     Array { ty: Type, size: usize, align: usize },
 }
 
 impl FixedValueKind {
     fn ty(&self) -> &Type {
         match self {
-            Self::Bool { ty } | Self::Integer { ty, .. } | Self::Array { ty, .. } => ty,
+            Self::Bool { ty }
+            | Self::Integer { ty, .. }
+            | Self::Pubkey { ty }
+            | Self::Array { ty, .. } => ty,
         }
     }
 
     fn size(&self) -> usize {
         match self {
             Self::Bool { .. } => 1,
+            Self::Pubkey { .. } => 32,
             Self::Integer { size, .. } | Self::Array { size, .. } => *size,
         }
     }
 
     fn align(&self) -> usize {
         match self {
-            Self::Bool { .. } => 1,
+            Self::Bool { .. } | Self::Pubkey { .. } => 1,
             Self::Integer { align, .. } | Self::Array { align, .. } => *align,
         }
     }
@@ -363,7 +368,17 @@ impl FixedValueKind {
     }
 
     fn needs_pod_bound(&self) -> bool {
-        matches!(self, Self::Array { .. })
+        matches!(self, Self::Pubkey { .. } | Self::Array { .. })
+    }
+
+    fn size_expr(&self) -> proc_macro2::TokenStream {
+        match self {
+            Self::Pubkey { .. } => quote!(32usize),
+            _ => {
+                let ty = self.ty();
+                quote!(core::mem::size_of::<#ty>())
+            }
+        }
     }
 }
 
@@ -407,17 +422,16 @@ impl FieldLayout {
     > {
         match self {
             Self::Value { value, optional } => {
-                let ty = value.ty();
+                let value_size_expr = value.size_expr();
                 match optional {
-                    OptionalKind::No => Ok((quote!(core::mem::size_of::<#ty>()), value.size())),
+                    OptionalKind::No => Ok((value_size_expr, value.size())),
                     OptionalKind::Tagged => Err((
                         (quote!(1), 1),
-                        (quote!((1 + core::mem::size_of::<#ty>())), 1 + value.size()),
+                        (quote!((1 + #value_size_expr)), 1 + value.size()),
                     )),
-                    OptionalKind::Implicit(_) => Err((
-                        (quote!(0), 0),
-                        (quote!(core::mem::size_of::<#ty>()), value.size()),
-                    )),
+                    OptionalKind::Implicit(_) => {
+                        Err(((quote!(0), 0), (value_size_expr, value.size())))
+                    }
                 }
             }
             Self::Vec { elem, flexible } => {
@@ -644,6 +658,11 @@ impl FieldLayout {
                             bytes[offset] = u8::from(self.#field_ident);
                             offset += 1;
                         },
+                        FixedValueKind::Pubkey { .. } => quote! {
+                            bytes[offset..offset + #value_size]
+                                .copy_from_slice(core::convert::AsRef::<[u8]>::as_ref(&self.#field_ident));
+                            offset += #value_size;
+                        },
                         _ => quote! {
                             bytes[offset..offset + #value_size]
                                 .copy_from_slice(::bytemuck::bytes_of(&self.#field_ident));
@@ -656,6 +675,17 @@ impl FieldLayout {
                                 bytes[offset] = 1;
                                 bytes[offset + 1] = u8::from(*value);
                                 offset += 2;
+                            } else {
+                                bytes[offset] = 0;
+                                offset += 1;
+                            }
+                        },
+                        FixedValueKind::Pubkey { .. } => quote! {
+                            if let core::option::Option::Some(value) = &self.#field_ident {
+                                bytes[offset] = 1;
+                                bytes[offset + 1..offset + 1 + #value_size]
+                                    .copy_from_slice(core::convert::AsRef::<[u8]>::as_ref(value));
+                                offset += 1 + #value_size;
                             } else {
                                 bytes[offset] = 0;
                                 offset += 1;
@@ -678,6 +708,13 @@ impl FieldLayout {
                             if let core::option::Option::Some(value) = &self.#field_ident {
                                 bytes[offset] = u8::from(*value);
                                 offset += 1;
+                            }
+                        },
+                        FixedValueKind::Pubkey { .. } => quote! {
+                            if let core::option::Option::Some(value) = &self.#field_ident {
+                                bytes[offset..offset + #value_size]
+                                    .copy_from_slice(core::convert::AsRef::<[u8]>::as_ref(value));
+                                offset += #value_size;
                             }
                         },
                         _ => quote! {
@@ -1060,6 +1097,12 @@ fn parse_field_layout(
                 "Vec<bool> is not supported by data_layout",
             ));
         }
+        if is_pubkey(elem_ty) {
+            return Err(syn::Error::new_spanned(
+                field,
+                "Vec<Pubkey> is not supported by data_layout",
+            ));
+        }
         let attribute = attribute.ok_or_else(|| {
             syn::Error::new_spanned(field, "Vec fields in data_layout require `#[flexible = N]`")
         })?;
@@ -1129,6 +1172,10 @@ fn parse_field_layout(
 fn parse_value_kind(ty: &Type) -> syn::Result<FixedValueKind> {
     if is_bool(ty) {
         return Ok(FixedValueKind::Bool { ty: ty.clone() });
+    }
+
+    if is_pubkey(ty) {
+        return Ok(FixedValueKind::Pubkey { ty: ty.clone() });
     }
 
     if let Some((size, align)) = integer_size_and_align(ty) {
@@ -1972,6 +2019,28 @@ fn is_bool(ty: &Type) -> bool {
         && type_path.path.segments[0].ident == "bool"
 }
 
+fn is_pubkey(ty: &Type) -> bool {
+    let Type::Path(TypePath { qself: None, path }) = ty else {
+        return false;
+    };
+
+    let mut segments = path.segments.iter();
+    let Some(first) = segments.next() else {
+        return false;
+    };
+    let second = segments.next();
+    if segments.next().is_some() {
+        return false;
+    }
+
+    if let Some(second) = second {
+        return (first.ident == "wheels" && second.ident == "Pubkey")
+            || (first.ident == "pinocchio" && second.ident == "Address");
+    }
+
+    first.ident == "Pubkey" || first.ident == "Address"
+}
+
 fn usize_lit(value: usize) -> LitInt {
     LitInt::new(&value.to_string(), Span::call_site())
 }
@@ -2055,6 +2124,10 @@ fn read_copy_expr(
         FixedValueKind::Array { ty, .. } => Ok(quote! {
             unsafe { core::ptr::read_unaligned((#bytes_expr).as_ptr().cast::<#ty>()) }
         }),
+        FixedValueKind::Pubkey { .. } => Err(syn::Error::new_spanned(
+            value.ty(),
+            "Pubkey fields are borrowed by data_layout",
+        )),
     }
 }
 
