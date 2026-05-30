@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
 use syn::{parse_macro_input, ItemStruct};
 
-mod data_layout;
+mod variable_offset_layout;
 
 ///
 /// Usage
@@ -11,7 +11,7 @@ mod data_layout;
 ///
 /// use wheels::Pubkey;
 ///
-/// #[data_layout(buffer_offset = 1)]
+/// #[variable_offset_layout(buffer_offset = 1)]
 /// struct DepositAndDelegateShuttleWithPrivateTransferArgs {
 ///     shuttle_id: u32,
 ///     amount: u64,
@@ -22,10 +22,10 @@ mod data_layout;
 ///     encrypted_data_suffix: Vec<u8>,
 /// }
 ///
-/// #[data_layout(buffer_offset = 1, option = implicit)]
+/// #[variable_offset_layout(buffer_offset = 1, option = implicit)]
 /// struct DepositAndDelegateShuttleArgs {
 ///     shuttle_id: u32,
-///     validator: Option<Address>,
+///     validator: Option<Pubkey>,
 ///     amount: u64,
 /// }
 ///
@@ -38,8 +38,8 @@ mod data_layout;
 /// ==========
 ///
 /// Struct attributes:
-///   - `#[data_layout(buffer_offset = 0..7)]`
-///   - `#[data_layout(buffer_offset = 0..7, option = implicit)]`
+///   - `#[variable_offset_layout(buffer_offset = 0..7)]`
+///   - `#[variable_offset_layout(buffer_offset = 0..7, option = implicit)]`
 ///
 ///     - `buffer_offset`
 ///
@@ -107,11 +107,11 @@ mod data_layout;
 ///   - Plain `bool` and `Option<bool>` are supported.
 ///     They are encoded as a single backing `u8` byte where `0` means
 ///     `false` and any non-zero byte decodes as `true`.
-///   - `Vec<bool>` is intentionally not supported by `data_layout`
+///   - `Vec<bool>` is intentionally not supported by `variable_offset_layout`
 ///     because its current view API exposes borrowed slices for `Vec` fields.
 ///   - Plain `Pubkey` and `Option<Pubkey>` are supported.
 ///     `Pubkey` is encoded as 32 raw bytes and views return borrowed keys.
-///   - `Vec<Pubkey>` is intentionally not supported by `data_layout`
+///   - `Vec<Pubkey>` is intentionally not supported by `variable_offset_layout`
 ///     because its current view API exposes borrowed slices for `Vec` fields.
 ///
 /// Field attributes:
@@ -150,11 +150,11 @@ mod data_layout;
 ///   - `pub fn encode(&self) -> Result<Vec<u8>, DataLayoutError>`
 ///   - `pub fn encode_to(&self, bytes: &mut [u8]) -> Result<(), DataLayoutError>`
 #[proc_macro_attribute]
-pub fn data_layout(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn variable_offset_layout(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr_string = attr.to_string();
     let input = parse_macro_input!(item as ItemStruct);
 
-    match data_layout::expand_data_layout(&attr_string, &input) {
+    match variable_offset_layout::expand_variable_offset_layout(&attr_string, &input) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }

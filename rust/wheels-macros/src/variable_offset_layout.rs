@@ -14,7 +14,7 @@ const FIELD_ATTRIBUTES: &[&str] = &["capacity", "flexible"];
 
 const MAX_LEN_WIDTH: usize = 8;
 
-pub(crate) fn expand_data_layout(
+pub(crate) fn expand_variable_offset_layout(
     attr: &str,
     input: &ItemStruct,
 ) -> syn::Result<proc_macro2::TokenStream> {
@@ -22,7 +22,7 @@ pub(crate) fn expand_data_layout(
     let mut emitted_input = input.clone();
     emitted_input
         .attrs
-        .retain(|attr| !attr.path().is_ident("data_layout"));
+        .retain(|attr| !attr.path().is_ident("variable_offset_layout"));
 
     ensure_allow_dead_code(&mut emitted_input.attrs);
 
@@ -33,7 +33,7 @@ pub(crate) fn expand_data_layout(
     let Fields::Named(fields) = &mut emitted_input.fields else {
         return Err(syn::Error::new_spanned(
             &emitted_input.fields,
-            "data_layout requires named fields",
+            "variable_offset_layout requires named fields",
         ));
     };
 
@@ -777,7 +777,7 @@ impl FieldLayout {
     //                 return Err(syn::Error::new(
     //                     field_ident.span(),
     //                     format!(
-    //                         "field `{}` cannot be borrowed by data_layout: size is {} byte(s) but alignment is {} byte(s), and fixed_layout only assumes the input buffer is 8-byte aligned",
+    //                         "field `{}` cannot be borrowed by variable_offset_layout: size is {} byte(s) but alignment is {} byte(s), and fixed_layout only assumes the input buffer is 8-byte aligned",
     //                         field_ident,
     //                         value.size(),
     //                         align,
@@ -826,7 +826,7 @@ impl FieldLayout {
     //                 return Err(syn::Error::new(
     //                     field_ident.span(),
     //                     format!(
-    //                         "field `{}` cannot expose a slice view in data_layout: each Vec element is {} byte(s) but alignment is {} byte(s), and fixed_layout only assumes the input buffer is 8-byte aligned, so it cannot support type which requires alignment greater than 8",
+    //                         "field `{}` cannot expose a slice view in variable_offset_layout: each Vec element is {} byte(s) but alignment is {} byte(s), and fixed_layout only assumes the input buffer is 8-byte aligned, so it cannot support type which requires alignment greater than 8",
     //                         field_ident,
     //                         elem.size(),
     //                         align,
@@ -1087,17 +1087,20 @@ fn parse_field_layout(
         if is_bool(elem_ty) {
             return Err(syn::Error::new_spanned(
                 field,
-                "Vec<bool> is not supported by data_layout",
+                "Vec<bool> is not supported by variable_offset_layout",
             ));
         }
         if is_pubkey(elem_ty) {
             return Err(syn::Error::new_spanned(
                 field,
-                "Vec<Pubkey> is not supported by data_layout",
+                "Vec<Pubkey> is not supported by variable_offset_layout",
             ));
         }
         let attribute = attribute.ok_or_else(|| {
-            syn::Error::new_spanned(field, "Vec fields in data_layout require `#[flexible = N]`")
+            syn::Error::new_spanned(
+                field,
+                "Vec fields in variable_offset_layout require `#[flexible = N]`",
+            )
         })?;
         let flexible = match attribute {
             FieldAttribute::Flexible(len_width) => Flexible { len_width },
@@ -1119,13 +1122,13 @@ fn parse_field_layout(
         if vec_inner(inner)?.is_some() {
             return Err(syn::Error::new_spanned(
                 field,
-                "Option<Vec<T>> is not supported in data_layout",
+                "Option<Vec<T>> is not supported in variable_offset_layout",
             ));
         }
         if is_string(inner) {
             return Err(syn::Error::new_spanned(
                 field,
-                "String is not supported by data_layout",
+                "String is not supported by variable_offset_layout",
             ));
         }
 
@@ -1152,7 +1155,7 @@ fn parse_field_layout(
     if is_string(ty) {
         return Err(syn::Error::new_spanned(
             field,
-            "String is not supported by data_layout",
+            "String is not supported by variable_offset_layout",
         ));
     }
 
@@ -1226,7 +1229,7 @@ fn parse_args(attr: &str) -> syn::Result<LayoutArgs> {
     if attr.trim().is_empty() {
         return Err(syn::Error::new(
             Span::call_site(),
-            "data_layout requires `buffer_offset = 0..7`",
+            "variable_offset_layout requires `buffer_offset = 0..7`",
         ));
     }
 
@@ -1281,7 +1284,7 @@ fn parse_args(attr: &str) -> syn::Result<LayoutArgs> {
             _ => {
                 return Err(syn::Error::new_spanned(
                     meta,
-                    "data_layout only supports `option = implicit` and `buffer_offset = 0..7`",
+                    "variable_offset_layout only supports `option = implicit` and `buffer_offset = 0..7`",
                 ))
             }
         }
@@ -1290,7 +1293,7 @@ fn parse_args(attr: &str) -> syn::Result<LayoutArgs> {
     let Some(buffer_offset) = buffer_offset else {
         return Err(syn::Error::new(
             Span::call_site(),
-            "data_layout requires `buffer_offset = 0..7`",
+            "variable_offset_layout requires `buffer_offset = 0..7`",
         ));
     };
 
@@ -1317,7 +1320,7 @@ fn validate_struct_options(
     {
         return Err(syn::Error::new_spanned(
             field,
-            "data_layout(option = implicit) does not support Vec fields",
+            "variable_offset_layout(option = implicit) does not support Vec fields",
         ));
     }
 
@@ -1337,7 +1340,7 @@ fn validate_struct_options(
     if implicit_option_count == 0 {
         return Err(syn::Error::new_spanned(
             struct_name,
-            "data_layout(option = implicit) requires at least one Option<T> field",
+            "variable_offset_layout(option = implicit) requires at least one Option<T> field",
         ));
     }
 
@@ -1370,7 +1373,7 @@ fn implicit_len_map(
     if implicit_payloads.len() > 128 {
         return Err(syn::Error::new_spanned(
             fields,
-            "data_layout(option = implicit) supports at most 128 Option<T> fields",
+            "variable_offset_layout(option = implicit) supports at most 128 Option<T> fields",
         ));
     }
 
@@ -1386,7 +1389,7 @@ fn implicit_len_map(
                 return Err(syn::Error::new(
                     field_ident.span(),
                     format!(
-                        "data_layout(option = implicit) requires Option<T> payload sizes to have unique subset sums: field `{}` creates duplicate extra payload length {}",
+                        "variable_offset_layout(option = implicit) requires Option<T> payload sizes to have unique subset sums: field `{}` creates duplicate extra payload length {}",
                         field_ident,
                         next_sum,
                     ),
@@ -1673,11 +1676,11 @@ impl BorrowedRequirement {
     ) -> String {
         match self {
             Self::Value { .. } => format!(
-                "field `{}` cannot be borrowed with `buffer_offset = {}`: it requires {}-byte alignment, but data_layout only assumes the original input buffer is 8-byte aligned",
+                "field `{}` cannot be borrowed with `buffer_offset = {}`: it requires {}-byte alignment, but variable_offset_layout only assumes the original input buffer is 8-byte aligned",
                 field_ident, buffer_offset, align
             ),
             Self::Vec { .. } => format!(
-                "field `{}` cannot expose a slice view with `buffer_offset = {}`: its elements require {}-byte alignment, but data_layout only assumes the original input buffer is 8-byte aligned",
+                "field `{}` cannot expose a slice view with `buffer_offset = {}`: its elements require {}-byte alignment, but variable_offset_layout only assumes the original input buffer is 8-byte aligned",
                 field_ident, buffer_offset, align
             ),
         }
@@ -1962,13 +1965,13 @@ fn vec_inner(ty: &Type) -> syn::Result<Option<&Type>> {
     let PathArguments::AngleBracketed(args) = &segment.arguments else {
         return Err(syn::Error::new_spanned(
             &segment.arguments,
-            "Vec requires exactly one type argument in data_layout: Vec<T>",
+            "Vec requires exactly one type argument in variable_offset_layout: Vec<T>",
         ));
     };
     if args.args.len() != 1 {
         return Err(syn::Error::new_spanned(
             args,
-            "Vec requires exactly one type argument in data_layout: Vec<T>",
+            "Vec requires exactly one type argument in variable_offset_layout: Vec<T>",
         ));
     }
 
@@ -2083,7 +2086,7 @@ fn fixed_array_size_and_align(ty: &Type) -> syn::Result<(usize, usize)> {
     let Type::Array(array) = ty else {
         return Err(syn::Error::new_spanned(
             ty,
-            "data_layout fields must be bool, integer primitives, or fixed-size arrays of integer primitives",
+            "variable_offset_layout fields must be bool, integer primitives, or fixed-size arrays of integer primitives",
         ));
     };
 
@@ -2119,7 +2122,7 @@ fn read_copy_expr(
         }),
         FixedValueKind::Pubkey { .. } => Err(syn::Error::new_spanned(
             value.ty(),
-            "Pubkey fields are borrowed by data_layout",
+            "Pubkey fields are borrowed by variable_offset_layout",
         )),
     }
 }
@@ -2250,11 +2253,11 @@ fn find_data_offset(
 
 #[cfg(test)]
 mod tests {
-    use super::expand_data_layout;
+    use super::expand_variable_offset_layout;
     use syn::parse_quote;
     //
     //     #[test]
-    //     fn data_layout_reports_padding_for_large_field() {
+    //     fn variable_offset_layout_reports_padding_for_large_field() {
     //         let item: syn::ItemStruct = parse_quote! {
     //             struct Args {
     //                 flag: u8,
@@ -2262,7 +2265,7 @@ mod tests {
     //             }
     //         };
     //
-    //         let error = expand_data_layout("", &item)
+    //         let error = expand_variable_offset_layout("", &item)
     //             .unwrap_err()
     //             .to_string();
     //         assert!(error.contains("field `payload` needs 7 byte(s) of padding before it"));
@@ -2270,7 +2273,7 @@ mod tests {
     //     }
     //
     //     #[test]
-    //     fn data_layout_reports_padding_for_optional_payload() {
+    //     fn variable_offset_layout_reports_padding_for_optional_payload() {
     //         let item: syn::ItemStruct = parse_quote! {
     //             struct Args {
     //                 flag: u8,
@@ -2278,7 +2281,7 @@ mod tests {
     //             }
     //         };
     //
-    //         let error = expand_data_layout("", &item)
+    //         let error = expand_variable_offset_layout("", &item)
     //             .unwrap_err()
     //             .to_string();
     //         assert!(error.contains("field `payload` needs 6 byte(s) of padding before it"));
@@ -2287,7 +2290,7 @@ mod tests {
     //     }
     //
     //     #[test]
-    //     fn data_layout_reports_padding_for_vec_elements() {
+    //     fn variable_offset_layout_reports_padding_for_vec_elements() {
     //         let item: syn::ItemStruct = parse_quote! {
     //             struct Args {
     //                 flag: u8,
@@ -2297,7 +2300,7 @@ mod tests {
     //             }
     //         };
     //
-    //         let error = expand_data_layout("", &item)
+    //         let error = expand_variable_offset_layout("", &item)
     //             .unwrap_err()
     //             .to_string();
     //         assert!(error.contains("field `values` needs 7 byte(s) of padding before it"));
@@ -2306,7 +2309,7 @@ mod tests {
     //     }
     //
     //     #[test]
-    //     fn data_layout_assumes_earlier_padding_errors_are_fixed() {
+    //     fn variable_offset_layout_assumes_earlier_padding_errors_are_fixed() {
     //         let item: syn::ItemStruct = parse_quote! {
     //             struct Args {
     //                 flag: u8,
@@ -2317,7 +2320,7 @@ mod tests {
     //             }
     //         };
     //
-    //         let error = expand_data_layout("", &item)
+    //         let error = expand_variable_offset_layout("", &item)
     //             .unwrap_err()
     //             .to_string();
     //         assert!(error.contains("field `payload` needs 7 byte(s) of padding before it"));
@@ -2325,37 +2328,37 @@ mod tests {
     //     }
     //
     //     #[test]
-    //     fn data_layout_rejects_alignment_above_eight() {
+    //     fn variable_offset_layout_rejects_alignment_above_eight() {
     //         let item: syn::ItemStruct = parse_quote! {
     //             struct Args {
     //                 big: u128,
     //             }
     //         };
     //
-    //         let error = expand_data_layout("", &item)
+    //         let error = expand_variable_offset_layout("", &item)
     //             .unwrap_err()
     //             .to_string();
-    //         assert!(error.contains("field `big` cannot be borrowed by data_layout"));
+    //         assert!(error.contains("field `big` cannot be borrowed by variable_offset_layout"));
     //         assert!(error.contains("alignment is 16 byte(s)"));
     //         assert!(error.contains("8-byte aligned"));
     //     }
     //
     //     #[test]
-    //     fn data_layout_rejects_vec_without_capacity() {
+    //     fn variable_offset_layout_rejects_vec_without_capacity() {
     //         let item: syn::ItemStruct = parse_quote! {
     //             struct Args {
     //                 values: Vec<u16>,
     //             }
     //         };
     //
-    //         let error = expand_data_layout("", &item)
+    //         let error = expand_variable_offset_layout("", &item)
     //             .unwrap_err()
     //             .to_string();
-    //         assert!(error.contains("Vec fields in data_layout require `#[capacity = N]`"));
+    //         assert!(error.contains("Vec fields in variable_offset_layout require `#[capacity = N]`"));
     //     }
     //
     //     #[test]
-    //     fn data_layout_rejects_capacity_on_non_vec() {
+    //     fn variable_offset_layout_rejects_capacity_on_non_vec() {
     //         let item: syn::ItemStruct = parse_quote! {
     //             struct Args {
     //                 #[capacity = 2]
@@ -2363,7 +2366,7 @@ mod tests {
     //             }
     //         };
     //
-    //         let error = expand_data_layout("", &item)
+    //         let error = expand_variable_offset_layout("", &item)
     //             .unwrap_err()
     //             .to_string();
     //         assert!(
@@ -2374,23 +2377,23 @@ mod tests {
     //     }
     //
     #[test]
-    fn data_layout_rejects_implicit_without_option() {
+    fn variable_offset_layout_rejects_implicit_without_option() {
         let item: syn::ItemStruct = parse_quote! {
             struct Args {
                 value: u16,
             }
         };
 
-        let error = expand_data_layout("buffer_offset = 0, option = implicit", &item)
+        let error = expand_variable_offset_layout("buffer_offset = 0, option = implicit", &item)
             .unwrap_err()
             .to_string();
-        assert!(
-            error.contains("data_layout(option = implicit) requires at least one Option<T> field")
-        );
+        assert!(error.contains(
+            "variable_offset_layout(option = implicit) requires at least one Option<T> field"
+        ));
     }
 
     #[test]
-    fn data_layout_rejects_implicit_with_vec() {
+    fn variable_offset_layout_rejects_implicit_with_vec() {
         let item: syn::ItemStruct = parse_quote! {
             struct Args {
                 value: Option<u16>,
@@ -2399,14 +2402,16 @@ mod tests {
             }
         };
 
-        let error = expand_data_layout("buffer_offset = 0, option = implicit", &item)
+        let error = expand_variable_offset_layout("buffer_offset = 0, option = implicit", &item)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("data_layout(option = implicit) does not support Vec fields"));
+        assert!(
+            error.contains("variable_offset_layout(option = implicit) does not support Vec fields")
+        );
     }
 
     #[test]
-    fn data_layout_rejects_implicit_with_ambiguous_subset_sums() {
+    fn variable_offset_layout_rejects_implicit_with_ambiguous_subset_sums() {
         let item: syn::ItemStruct = parse_quote! {
             struct Args {
                 first: Option<u8>,
@@ -2415,57 +2420,60 @@ mod tests {
             }
         };
 
-        let error = expand_data_layout("buffer_offset = 0, option = implicit", &item)
+        let error = expand_variable_offset_layout("buffer_offset = 0, option = implicit", &item)
             .unwrap_err()
             .to_string();
         assert!(error.contains(
-            "data_layout(option = implicit) requires Option<T> payload sizes to have unique subset sums"
+            "variable_offset_layout(option = implicit) requires Option<T> payload sizes to have unique subset sums"
         ));
     }
 
     #[test]
-    fn data_layout_rejects_unknown_parameters() {
+    fn variable_offset_layout_rejects_unknown_parameters() {
         let item: syn::ItemStruct = parse_quote! {
             struct Args {
                 value: u16,
             }
         };
 
-        let error = expand_data_layout("foo = bar", &item)
+        let error = expand_variable_offset_layout("foo = bar", &item)
             .unwrap_err()
             .to_string();
-        assert!(error
-            .contains("data_layout only supports `option = implicit` and `buffer_offset = 0..7`"));
+        assert!(error.contains(
+            "variable_offset_layout only supports `option = implicit` and `buffer_offset = 0..7`"
+        ));
     }
 
     #[test]
-    fn data_layout_requires_buffer_offset() {
+    fn variable_offset_layout_requires_buffer_offset() {
         let item: syn::ItemStruct = parse_quote! {
             struct Args {
                 value: u16,
             }
         };
 
-        let error = expand_data_layout("", &item).unwrap_err().to_string();
-        assert!(error.contains("data_layout requires `buffer_offset = 0..7`"));
+        let error = expand_variable_offset_layout("", &item)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("variable_offset_layout requires `buffer_offset = 0..7`"));
     }
 
     #[test]
-    fn data_layout_rejects_invalid_buffer_offset() {
+    fn variable_offset_layout_rejects_invalid_buffer_offset() {
         let item: syn::ItemStruct = parse_quote! {
             struct Args {
                 value: u16,
             }
         };
 
-        let error = expand_data_layout("buffer_offset = 8", &item)
+        let error = expand_variable_offset_layout("buffer_offset = 8", &item)
             .unwrap_err()
             .to_string();
         assert!(error.contains("buffer_offset must be in the range 0..=7"));
     }
 
     #[test]
-    fn data_layout_accepts_flexible_len_width_eight() {
+    fn variable_offset_layout_accepts_flexible_len_width_eight() {
         let item: syn::ItemStruct = parse_quote! {
             struct Args {
                 tag: u8,
@@ -2474,11 +2482,11 @@ mod tests {
             }
         };
 
-        expand_data_layout("buffer_offset = 0", &item).unwrap();
+        expand_variable_offset_layout("buffer_offset = 0", &item).unwrap();
     }
 
     #[test]
-    fn data_layout_rejects_invalid_flexible_len_width() {
+    fn variable_offset_layout_rejects_invalid_flexible_len_width() {
         let item: syn::ItemStruct = parse_quote! {
             struct Args {
                 #[flexible = 9]
@@ -2486,21 +2494,21 @@ mod tests {
             }
         };
 
-        let error = expand_data_layout("buffer_offset = 0", &item)
+        let error = expand_variable_offset_layout("buffer_offset = 0", &item)
             .unwrap_err()
             .to_string();
         assert!(error.contains("flexible must be in the range 1..=8"));
     }
 
     #[test]
-    fn data_layout_rejects_borrowed_field_when_buffer_offset_prevents_alignment() {
+    fn variable_offset_layout_rejects_borrowed_field_when_buffer_offset_prevents_alignment() {
         let item: syn::ItemStruct = parse_quote! {
             struct Args {
                 values: [u64; 2],
             }
         };
 
-        let error = expand_data_layout("buffer_offset = 1", &item)
+        let error = expand_variable_offset_layout("buffer_offset = 1", &item)
             .unwrap_err()
             .to_string();
         assert!(error.contains("field `values` cannot be borrowed with `buffer_offset = 1`"));
@@ -2508,7 +2516,7 @@ mod tests {
     }
 
     #[test]
-    fn data_layout_rejects_fixed_misaligned_vec_slice() {
+    fn variable_offset_layout_rejects_fixed_misaligned_vec_slice() {
         let item: syn::ItemStruct = parse_quote! {
             struct Args {
                 flag: u8,
@@ -2517,7 +2525,7 @@ mod tests {
             }
         };
 
-        let error = expand_data_layout("buffer_offset = 0", &item)
+        let error = expand_variable_offset_layout("buffer_offset = 0", &item)
             .unwrap_err()
             .to_string();
         assert!(error.contains("field `values` cannot expose a slice view"));
@@ -2525,7 +2533,7 @@ mod tests {
     }
 
     #[test]
-    fn data_layout_rejects_vec_bool() {
+    fn variable_offset_layout_rejects_vec_bool() {
         let item: syn::ItemStruct = parse_quote! {
             struct Args {
                 #[flexible = 1]
@@ -2533,14 +2541,14 @@ mod tests {
             }
         };
 
-        let error = expand_data_layout("buffer_offset = 0", &item)
+        let error = expand_variable_offset_layout("buffer_offset = 0", &item)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("Vec<bool> is not supported by data_layout"));
+        assert!(error.contains("Vec<bool> is not supported by variable_offset_layout"));
     }
 
     #[test]
-    fn data_layout_rejects_borrowed_field_after_unstable_variable_field() {
+    fn variable_offset_layout_rejects_borrowed_field_after_unstable_variable_field() {
         let item: syn::ItemStruct = parse_quote! {
             struct Args {
                 tag: u8,
@@ -2550,7 +2558,7 @@ mod tests {
             }
         };
 
-        let error = expand_data_layout("buffer_offset = 0", &item)
+        let error = expand_variable_offset_layout("buffer_offset = 0", &item)
             .unwrap_err()
             .to_string();
         assert!(error.contains("field `values` cannot be borrowed"));
