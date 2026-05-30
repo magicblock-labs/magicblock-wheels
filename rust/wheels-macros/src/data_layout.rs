@@ -299,7 +299,7 @@ impl FieldOffset {
         let FieldOffset::FixedOffset { offset, .. } = self else {
             return None;
         };
-        return Some(*offset);
+        Some(*offset)
     }
 
     fn layout(&self) -> &FieldLayout {
@@ -401,6 +401,9 @@ enum OptionalKind {
     Implicit(usize),
 }
 
+type SlotLen = (proc_macro2::TokenStream, usize);
+type SlotMinMaxLen = Result<SlotLen, (SlotLen, SlotLen)>;
+
 impl FieldLayout {
     fn is_fixed(&self) -> bool {
         match self {
@@ -409,17 +412,7 @@ impl FieldLayout {
         }
     }
 
-    fn slot_minmax_len(
-        &self,
-    ) -> Result<
-        // fixed size
-        (proc_macro2::TokenStream, usize),
-        // variable size (min and max)
-        (
-            (proc_macro2::TokenStream, usize), // min
-            (proc_macro2::TokenStream, usize), // max
-        ),
-    > {
+    fn slot_minmax_len(&self) -> SlotMinMaxLen {
         match self {
             Self::Value { value, optional } => {
                 let value_size_expr = value.size_expr();
@@ -1129,7 +1122,7 @@ fn parse_field_layout(
                 "Option<Vec<T>> is not supported in data_layout",
             ));
         }
-        if is_string(&inner) {
+        if is_string(inner) {
             return Err(syn::Error::new_spanned(
                 field,
                 "String is not supported by data_layout",
@@ -1156,7 +1149,7 @@ fn parse_field_layout(
         ));
     }
 
-    if is_string(&ty) {
+    if is_string(ty) {
         return Err(syn::Error::new_spanned(
             field,
             "String is not supported by data_layout",
@@ -2175,7 +2168,7 @@ fn find_data_offset(
                 })
                 .unwrap();
 
-            assert_eq!(layout.is_fixed(), false);
+            assert!(!layout.is_fixed());
 
             // | F | F | V | V | V | V |
             //

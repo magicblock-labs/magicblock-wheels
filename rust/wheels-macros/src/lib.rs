@@ -25,7 +25,7 @@ mod data_layout;
 /// #[data_layout(buffer_offset = 1, option = implicit)]
 /// struct DepositAndDelegateShuttleArgs {
 ///     shuttle_id: u32,
-///     validator: Option<Pubkey>,
+///     validator: Option<Address>,
 ///     amount: u64,
 /// }
 ///

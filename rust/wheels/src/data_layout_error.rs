@@ -1,7 +1,7 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum DataLayoutError {
-    InvalidDataLength = DataLayoutError::MIN + 0,
+    InvalidDataLength = DataLayoutError::MIN,
     InvalidBufferOffset = DataLayoutError::MIN + 1,
     InvalidOptionTag = DataLayoutError::MIN + 2,
     LengthExceedsCapacity = DataLayoutError::MIN + 3,
