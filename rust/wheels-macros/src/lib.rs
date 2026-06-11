@@ -129,10 +129,10 @@ pub fn fixed_offset_layout(attr: TokenStream, item: TokenStream) -> TokenStream 
 ///     `false` and any non-zero byte decodes as `true`.
 ///   - `Vec<bool>` is intentionally not supported by `variable_offset_layout`
 ///     because its current view API exposes borrowed slices for `Vec` fields.
-///   - Plain `Pubkey` and `Option<Pubkey>` are supported.
+///   - Plain `Pubkey`/`Address` and `Option<Pubkey>`/`Option<Address>` are supported.
 ///     `Pubkey` is encoded as 32 raw bytes and views return borrowed keys.
-///   - `Vec<Pubkey>` is intentionally not supported by `variable_offset_layout`
-///     because its current view API exposes borrowed slices for `Vec` fields.
+///   - `Vec<Pubkey>`/`Vec<Address>` is supported and views return borrowed key
+///     slices.
 ///
 /// Field attributes:
 ///   - `#[flexible = N]`

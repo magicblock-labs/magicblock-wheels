@@ -4,9 +4,8 @@ use std::{
 };
 
 use crate::common::{
-    ensure_allow_dead_code, impl_where_clause, is_bool, is_pubkey, is_string, option_inner,
-    parse_value_kind, read_copy_expr, strip_field_attr, usize_lit, vec_inner, AccessMode,
-    FixedValueKind,
+    ensure_allow_dead_code, impl_where_clause, is_bool, is_string, option_inner, parse_value_kind,
+    read_copy_expr, strip_field_attr, usize_lit, vec_inner, AccessMode, FixedValueKind,
 };
 use proc_macro2::Span;
 use quote::{format_ident, quote};
@@ -18,7 +17,7 @@ use syn::{
 const FIELD_ATTRIBUTES: &[&str] = &["capacity", "flexible"];
 const LAYOUT_NAME: &str = "variable_offset_layout";
 const UNSUPPORTED_FIELD_MESSAGE: &str =
-    "variable_offset_layout fields must be bool, integer primitives, or fixed-size arrays of integer primitives";
+    "variable_offset_layout fields must be bool, Pubkey, integer primitives, or fixed-size arrays of integer primitives";
 const INTEGER_FIELD_MESSAGE: &str = "field must be an integer primitive or bool";
 
 const MAX_LEN_WIDTH: usize = 8;
@@ -1038,12 +1037,6 @@ fn parse_field_layout(
             return Err(syn::Error::new_spanned(
                 field,
                 "Vec<bool> is not supported by variable_offset_layout",
-            ));
-        }
-        if is_pubkey(elem_ty) {
-            return Err(syn::Error::new_spanned(
-                field,
-                "Vec<Pubkey> is not supported by variable_offset_layout",
             ));
         }
         let attribute = attribute.ok_or_else(|| {

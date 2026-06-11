@@ -171,3 +171,42 @@ fn fixed_offset_layout_supports_bool_and_address() {
     assert_eq!(view.owner(), &Address::from([5; 32]));
     assert_eq!(view.sponsored(), Some(false));
 }
+
+#[fixed_offset_layout]
+struct FixedAddressVecArgs {
+    tag: u8,
+    #[capacity = 2]
+    owners: Vec<Address>,
+    checksum: u16,
+}
+
+#[test]
+fn fixed_offset_layout_supports_address_vec() {
+    assert_eq!(FixedAddressVecArgs::DATA_LEN, 68);
+    assert_eq!(FixedAddressVecArgs::OFFSETS, [0, 1, 66]);
+
+    let owners = vec![Address::from([1; 32]), Address::from([2; 32])];
+    let value = FixedAddressVecArgs {
+        tag: 9,
+        owners: owners.clone(),
+        checksum: 0xBEEF,
+    };
+    let encoded = value.encode().unwrap();
+    let expected = [
+        [9, 2].as_slice(),
+        [1; 32].as_slice(),
+        [2; 32].as_slice(),
+        0xBEEF_u16.to_le_bytes().as_slice(),
+    ]
+    .concat();
+    assert_eq!(encoded.as_slice(), expected.as_slice());
+
+    let mut aligned = Aligned([0; FixedAddressVecArgs::DATA_LEN]);
+    aligned.0.copy_from_slice(&encoded);
+
+    let view = FixedAddressVecArgs::decode(&aligned.0).unwrap();
+    assert_eq!(view.tag(), 9);
+    assert_eq!(view.owners(), owners.as_slice());
+    assert_eq!(view.owners_capacity(), 2);
+    assert_eq!(view.checksum(), 0xBEEF);
+}

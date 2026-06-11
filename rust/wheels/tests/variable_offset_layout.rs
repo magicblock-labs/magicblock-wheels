@@ -145,6 +145,43 @@ fn variable_layout_computes_pubkey_offset_after_variable_field() {
 }
 
 #[variable_offset_layout(buffer_offset = 0)]
+struct AddressVecArgs {
+    header: u16,
+    #[flexible = 1]
+    signers: Vec<Address>,
+    checksum: u16,
+}
+
+#[test]
+fn variable_layout_supports_address_vec() {
+    assert_eq!(AddressVecArgs::DATA_LEN_RANGE, (5, 2 + 1 + 0xFF * 32 + 2));
+
+    let signers = vec![Address::from([1; 32]), Address::from([2; 32])];
+    let value = AddressVecArgs {
+        header: 7,
+        signers: signers.clone(),
+        checksum: 0xBEEF,
+    };
+    let encoded = value.encode().unwrap();
+    assert_eq!(
+        encoded,
+        [
+            7_u16.to_le_bytes().as_slice(),
+            [2].as_slice(),
+            [1; 32].as_slice(),
+            [2; 32].as_slice(),
+            0xBEEF_u16.to_le_bytes().as_slice(),
+        ]
+        .concat()
+    );
+
+    let view = AddressVecArgs::decode(&encoded).unwrap();
+    assert_eq!(view.header(), 7);
+    assert_eq!(view.signers(), signers.as_slice());
+    assert_eq!(view.checksum(), 0xBEEF);
+}
+
+#[variable_offset_layout(buffer_offset = 0)]
 struct PrivateTransferArgs {
     shuttle_id: u32,
     amount: u64,
