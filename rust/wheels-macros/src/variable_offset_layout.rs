@@ -157,6 +157,37 @@ pub(crate) fn expand_variable_offset_layout(
     } else {
         quote!()
     };
+    let decodable_impl = if args.option_encoding == StructOptionEncoding::Implicit {
+        quote! {
+            impl ::wheels::layout::ExactDecodable for #struct_name {
+                type View<'a> = #view_name<'a>;
+
+                fn decode_exact<'a>(
+                    bytes: &'a [u8]
+                ) -> core::result::Result<Self::View<'a>, ::wheels::DataLayoutError> {
+                    let encoded_len = Self::__validate_prefix(bytes)?;
+                    if encoded_len != bytes.len() {
+                        return Err(::wheels::DataLayoutError::InvalidDataLength);
+                    }
+                    Ok(#view_name { bytes })
+                }
+            }
+        }
+    } else {
+        quote! {
+            impl ::wheels::layout::Decodable for #struct_name {
+                type View<'a> = #view_name<'a>;
+
+                fn decode_prefix<'a>(
+                    bytes: &'a [u8]
+                ) -> core::result::Result<(Self::View<'a>, &'a [u8]), ::wheels::DataLayoutError> {
+                    let encoded_len = Self::__validate_prefix(bytes)?;
+                    let (bytes, remaining) = bytes.split_at(encoded_len);
+                    Ok((#view_name { bytes }, remaining))
+                }
+            }
+        }
+    };
 
     Ok(quote! {
         #emitted_input
@@ -272,17 +303,7 @@ pub(crate) fn expand_variable_offset_layout(
             }
         }
 
-        impl ::wheels::layout::Decodable for #struct_name {
-            type View<'a> = #view_name<'a>;
-
-            fn decode_prefix<'a>(
-                bytes: &'a [u8]
-            ) -> core::result::Result<(Self::View<'a>, &'a [u8]), ::wheels::DataLayoutError> {
-                let encoded_len = Self::__validate_prefix(bytes)?;
-                let (bytes, remaining) = bytes.split_at(encoded_len);
-                Ok((#view_name { bytes }, remaining))
-            }
-        }
+        #decodable_impl
 
         #[allow(dead_code)]
         #[derive(Debug)]
