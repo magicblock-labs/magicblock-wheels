@@ -22,12 +22,26 @@ pub trait Encodable {
 pub trait Decodable {
     type View<'a>;
 
+    ///
+    /// Decodes the first value from bytes, ignoring any trailing bytes.
+    ///
     fn decode<'a>(bytes: &'a [u8]) -> Result<Self::View<'a>, DataLayoutError> {
         Ok(Self::decode_prefix(bytes)?.0)
     }
 
     ///
-    /// Decodes a prefix and returns the remaining bytes
+    /// Decodes one value and fails if any trailing bytes remain.
+    ///
+    fn decode_exact<'a>(bytes: &'a [u8]) -> Result<Self::View<'a>, DataLayoutError> {
+        let (view, remaining) = Self::decode_prefix(bytes)?;
+        if !remaining.is_empty() {
+            return Err(DataLayoutError::InvalidDataLength);
+        }
+        Ok(view)
+    }
+
+    ///
+    /// Decodes a prefix and returns the decoded view plus unconsumed bytes.
     ///
     fn decode_prefix<'a>(bytes: &'a [u8]) -> Result<(Self::View<'a>, &'a [u8]), DataLayoutError>;
 }

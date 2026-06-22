@@ -147,6 +147,16 @@ pub(crate) fn expand_variable_offset_layout(
     )?;
     let data_len_validation =
         data_len_validation(struct_name, min_datalen, max_datalen, &field_layouts)?;
+    // Implicit options infer presence from total length, so prefix decoding
+    // remains exact-slice only until a framing policy is chosen.
+    let prefix_len_validation = if args.option_encoding == StructOptionEncoding::Implicit {
+        quote! {
+            #data_len_validation
+            #implicit_len_validation
+        }
+    } else {
+        quote!()
+    };
 
     Ok(quote! {
         #emitted_input
@@ -157,9 +167,9 @@ pub(crate) fn expand_variable_offset_layout(
 
             #public_len_const
 
-            fn __validate_bytes(
+            fn __validate_prefix(
                 bytes: &[u8],
-            ) -> core::result::Result<(), ::wheels::DataLayoutError> {
+            ) -> core::result::Result<usize, ::wheels::DataLayoutError> {
                 if (bytes.as_ptr() as usize) % 8 != #buffer_offset_lit {
                     ::pinocchio_log::log!(
                         "bytes [ptr_mod_8={}] cannot be deserialized to {} which requires buffer_offset = {} from an 8-byte aligned base",
@@ -172,13 +182,12 @@ pub(crate) fn expand_variable_offset_layout(
                     );
                 }
 
-                #data_len_validation
-                #implicit_len_validation
+                #prefix_len_validation
 
                 let mut offset = 0usize;
                 #(#validate_steps)*
 
-                Ok(())
+                Ok(offset)
             }
 
             fn __read_len_header_unchecked(
@@ -269,8 +278,9 @@ pub(crate) fn expand_variable_offset_layout(
             fn decode_prefix<'a>(
                 bytes: &'a [u8]
             ) -> core::result::Result<(Self::View<'a>, &'a [u8]), ::wheels::DataLayoutError> {
-                Self::__validate_bytes(bytes)?;
-                Ok((#view_name { bytes }, bytes))
+                let encoded_len = Self::__validate_prefix(bytes)?;
+                let (bytes, remaining) = bytes.split_at(encoded_len);
+                Ok((#view_name { bytes }, remaining))
             }
         }
 

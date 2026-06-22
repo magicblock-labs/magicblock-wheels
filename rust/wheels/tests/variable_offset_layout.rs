@@ -325,6 +325,58 @@ fn variable_layout_encode_supports_fields_after_variable_fields() {
 }
 
 #[test]
+fn variable_layout_decode_prefix_returns_remainder_after_vec_layout() {
+    let mut aligned = Aligned([0; 23]);
+    let bytes = &mut aligned.0;
+
+    bytes[0..2].copy_from_slice(&7_u16.to_le_bytes());
+    bytes[2] = 1;
+    bytes[3..7].copy_from_slice(&9_u32.to_le_bytes());
+    bytes[7] = 3;
+    bytes[8..11].copy_from_slice(&[1, 2, 3]);
+    bytes[11..19].copy_from_slice(&77_u64.to_le_bytes());
+    bytes[19..21].copy_from_slice(&0xBEEF_u16.to_le_bytes());
+    bytes[21..23].copy_from_slice(&[250, 251]);
+
+    let (view, remaining) = VariableOffsetViewArgs::decode_prefix(bytes).unwrap();
+
+    assert_eq!(view.header(), 7);
+    assert_eq!(view.validator(), Some(9));
+    assert_eq!(view.payload(), &[1, 2, 3]);
+    assert_eq!(view.amount(), 77);
+    assert_eq!(view.checksum(), 0xBEEF);
+    assert_eq!(view.bytes(), &bytes[..21]);
+    assert_eq!(remaining, &[250, 251]);
+}
+
+#[test]
+fn variable_layout_decode_ignores_trailing_and_decode_exact_rejects_it() {
+    let mut aligned = Aligned([0; 23]);
+    let bytes = &mut aligned.0;
+
+    bytes[0..2].copy_from_slice(&7_u16.to_le_bytes());
+    bytes[2] = 1;
+    bytes[3..7].copy_from_slice(&9_u32.to_le_bytes());
+    bytes[7] = 3;
+    bytes[8..11].copy_from_slice(&[1, 2, 3]);
+    bytes[11..19].copy_from_slice(&77_u64.to_le_bytes());
+    bytes[19..21].copy_from_slice(&0xBEEF_u16.to_le_bytes());
+    bytes[21..23].copy_from_slice(&[250, 251]);
+
+    let view = VariableOffsetViewArgs::decode(bytes).unwrap();
+    assert_eq!(view.bytes(), &bytes[..21]);
+    assert_eq!(view.payload(), &[1, 2, 3]);
+
+    let exact_view = VariableOffsetViewArgs::decode_exact(&bytes[..21]).unwrap();
+    assert_eq!(exact_view.bytes(), &bytes[..21]);
+
+    assert_eq!(
+        VariableOffsetViewArgs::decode_exact(bytes).unwrap_err(),
+        DataLayoutError::InvalidDataLength
+    );
+}
+
+#[test]
 fn variable_layout_handles_none_and_empty_vec_before_trailing_fields() {
     let mut aligned = Aligned([0; VariableOffsetViewArgs::DATA_LEN_RANGE.0]);
     let bytes = &mut aligned.0;
@@ -620,6 +672,25 @@ fn variable_layout_supports_bool_and_tagged_option_bool() {
         amount: 9,
     };
     assert_eq!(value.encode().unwrap(), vec![1, 1, 1, 9, 0]);
+}
+
+#[test]
+fn variable_layout_decode_prefix_returns_remainder_after_tagged_option_layout() {
+    let mut aligned = Aligned([0; 6]);
+    let bytes = &mut aligned.0;
+
+    bytes[0] = 2;
+    bytes[1] = 0;
+    bytes[2..4].copy_from_slice(&9_u16.to_le_bytes());
+    bytes[4..6].copy_from_slice(&[250, 251]);
+
+    let (view, remaining) = BoolArgs::decode_prefix(bytes).unwrap();
+
+    assert_eq!(view.enabled(), true);
+    assert_eq!(view.sponsored(), None);
+    assert_eq!(view.amount(), 9);
+    assert_eq!(view.bytes(), &bytes[..4]);
+    assert_eq!(remaining, &[250, 251]);
 }
 
 #[variable_offset_layout(buffer_offset = 0, option = implicit)]
