@@ -773,6 +773,30 @@ fn variable_layout_decode_prefix_returns_remainder_after_tagged_option_layout() 
     assert_eq!(remaining, &[250, 251]);
 }
 
+#[test]
+fn variable_layout_decodes_implicit_option_value_exactly() {
+    let none = <Option<BoolArgs> as Decodable>::decode(&[]).unwrap();
+    assert!(none.is_none());
+
+    let mut some_aligned = Aligned([0; 5]);
+    let some_bytes = &mut some_aligned.0;
+    some_bytes.copy_from_slice(&[7, 1, 3, 9, 0]);
+    let some = <Option<BoolArgs> as Decodable>::decode(some_bytes)
+        .unwrap()
+        .unwrap();
+    assert_eq!(some.enabled(), true);
+    assert_eq!(some.sponsored(), Some(true));
+    assert_eq!(some.amount(), 9);
+
+    let mut trailing_aligned = Aligned([0; 6]);
+    let trailing_bytes = &mut trailing_aligned.0;
+    trailing_bytes.copy_from_slice(&[7, 1, 3, 9, 0, 250]);
+    assert_eq!(
+        <Option<BoolArgs> as Decodable>::decode(trailing_bytes).unwrap_err(),
+        DataLayoutError::InvalidDataLength
+    );
+}
+
 #[variable_offset_layout(buffer_offset = 0, option = implicit)]
 struct ImplicitOptionArgs {
     shuttle_id: u32,

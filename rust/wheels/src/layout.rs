@@ -67,6 +67,10 @@ impl_tuple_encodable!(A, B, C);
 /// Layouts that can safely decode from the front of a larger buffer also
 /// implement `PrefixDecodable`.
 ///
+/// `Option<T>` exact decoding treats an empty slice as `None` and a non-empty
+/// slice as `Some(T::decode(bytes)?)`. This is useful for implicitly encoded
+/// options whose absence is known only from the caller's framing.
+///
 pub trait Decodable {
     type View<'a>;
 
@@ -102,5 +106,20 @@ where
             return Err(DataLayoutError::InvalidDataLength);
         }
         Ok(view)
+    }
+}
+
+impl<T> Decodable for Option<T>
+where
+    T: Decodable,
+{
+    type View<'a> = Option<T::View<'a>>;
+
+    fn decode<'a>(bytes: &'a [u8]) -> Result<Self::View<'a>, DataLayoutError> {
+        if bytes.is_empty() {
+            Ok(None)
+        } else {
+            T::decode(bytes).map(Some)
+        }
     }
 }
