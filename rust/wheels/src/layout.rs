@@ -19,6 +19,42 @@ pub trait Encodable {
     fn encode_to<'a>(&self, out: &'a mut [u8]) -> Result<&'a mut [u8], DataLayoutError>;
 }
 
+macro_rules! impl_tuple_encodable {
+    ($($name:ident),+ $(,)?) => {
+        impl<$($name),+> Encodable for ($($name,)+)
+        where
+            $($name: Encodable,)+
+        {
+            fn encoded_len(&self) -> Result<usize, DataLayoutError> {
+                #[allow(non_snake_case)]
+                let ($($name,)+) = self;
+
+                let mut len = 0usize;
+                $(
+                    len = len
+                        .checked_add($name.encoded_len()?)
+                        .ok_or(DataLayoutError::LengthExceedsCapacity)?;
+                )+
+                Ok(len)
+            }
+
+            fn encode_to<'a>(&self, out: &'a mut [u8]) -> Result<&'a mut [u8], DataLayoutError> {
+                #[allow(non_snake_case)]
+                let ($($name,)+) = self;
+
+                $(
+                    let out = $name.encode_to(out)?;
+                )+
+                Ok(out)
+            }
+        }
+    };
+}
+
+impl_tuple_encodable!(A);
+impl_tuple_encodable!(A, B);
+impl_tuple_encodable!(A, B, C);
+
 ///
 /// Exact-slice decoding.
 ///

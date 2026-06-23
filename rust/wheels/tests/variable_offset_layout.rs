@@ -256,6 +256,7 @@ fn variable_layout_private_args() {
     assert_eq!(&encoded_out[expected_len..], &[255, 255, 255, 255]);
 }
 
+#[derive(Clone)]
 #[variable_offset_layout(buffer_offset = 0)]
 struct VariableOffsetViewArgs {
     header: u16,
@@ -322,6 +323,53 @@ fn variable_layout_encode_supports_fields_after_variable_fields() {
     value.encode_to(&mut encoded_out).unwrap();
     assert_eq!(&encoded_out[..encoded.len()], &encoded);
     assert_eq!(&encoded_out[encoded.len()..], &[255, 255, 255]);
+}
+
+#[test]
+fn variable_layout_encodes_tuple_compositions() {
+    let first = BoolArgs {
+        enabled: true,
+        sponsored: None,
+        amount: 9,
+    };
+    let second = VariableOffsetViewArgs {
+        header: 7,
+        validator: Some(9),
+        payload: vec![1, 2, 3],
+        amount: 77,
+        checksum: 0xBEEF,
+    };
+    let third = UnalignedCopyArgs {
+        amount: 55,
+        counter: 7,
+    };
+
+    let first_encoded = first.encode().unwrap();
+    let second_encoded = second.encode().unwrap();
+    let third_encoded = third.encode().unwrap();
+
+    assert_eq!((first.clone(),).encoded_len().unwrap(), first_encoded.len());
+
+    let two = (first.clone(), second.clone());
+    assert_eq!(
+        two.encode().unwrap(),
+        [first_encoded.as_slice(), second_encoded.as_slice()].concat()
+    );
+
+    let three = (first, second, third);
+    let expected = [
+        first_encoded.as_slice(),
+        second_encoded.as_slice(),
+        third_encoded.as_slice(),
+    ]
+    .concat();
+    assert_eq!(three.encoded_len().unwrap(), expected.len());
+    assert_eq!(three.encode().unwrap(), expected);
+
+    let mut out = vec![255; expected.len() + 2];
+    let remaining = three.encode_to(&mut out).unwrap();
+    assert_eq!(remaining, &[255, 255]);
+    assert_eq!(&out[..expected.len()], &expected);
 }
 
 #[test]
@@ -621,6 +669,7 @@ fn variable_layout_rejects_misaligned_base_buffer_for_borrowed_fields() {
     );
 }
 
+#[derive(Clone)]
 #[variable_offset_layout(buffer_offset = 1)]
 struct UnalignedCopyArgs {
     amount: u64,
@@ -673,6 +722,7 @@ fn variable_layout_unaligned_buffer_offset_decodes_copy_and_alignment_one_views(
     assert_eq!(view.checksum(), 9);
 }
 
+#[derive(Clone)]
 #[variable_offset_layout(buffer_offset = 0)]
 struct BoolArgs {
     enabled: bool,
