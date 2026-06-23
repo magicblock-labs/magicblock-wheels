@@ -715,7 +715,7 @@ fn variable_layout_unaligned_buffer_offset_decodes_copy_and_alignment_one_views(
     let view = UnalignedDynamicArgs::decode(&bytes[..79]).unwrap();
 
     assert_eq!(view.amount(), 55);
-    assert_eq!(view.enabled(), true);
+    assert!(view.enabled());
     assert_eq!(view.authority(), &Pubkey::from([2; 32]));
     assert_eq!(view.raw(), &[3; 32]);
     assert_eq!(view.payload(), &[4, 5, 6]);
@@ -736,13 +736,13 @@ fn variable_layout_supports_bool_and_tagged_option_bool() {
 
     let none_bytes = [2, 0, 9, 0].to_vec();
     let none_view = BoolArgs::decode(&none_bytes).unwrap();
-    assert_eq!(none_view.enabled(), true);
+    assert!(none_view.enabled());
     assert_eq!(none_view.sponsored(), None);
     assert_eq!(none_view.amount(), 9);
 
     let some_bytes = [7, 1, 3, 9, 0].to_vec();
     let some_view = BoolArgs::decode(&some_bytes).unwrap();
-    assert_eq!(some_view.enabled(), true);
+    assert!(some_view.enabled());
     assert_eq!(some_view.sponsored(), Some(true));
     assert_eq!(some_view.amount(), 9);
 
@@ -766,7 +766,7 @@ fn variable_layout_decode_prefix_returns_remainder_after_tagged_option_layout() 
 
     let (view, remaining) = BoolArgs::decode_prefix(bytes).unwrap();
 
-    assert_eq!(view.enabled(), true);
+    assert!(view.enabled());
     assert_eq!(view.sponsored(), None);
     assert_eq!(view.amount(), 9);
     assert_eq!(view.bytes(), &bytes[..4]);
@@ -784,7 +784,7 @@ fn variable_layout_decodes_implicit_option_value_exactly() {
     let some = <Option<BoolArgs> as Decodable>::decode(some_bytes)
         .unwrap()
         .unwrap();
-    assert_eq!(some.enabled(), true);
+    assert!(some.enabled());
     assert_eq!(some.sponsored(), Some(true));
     assert_eq!(some.amount(), 9);
 

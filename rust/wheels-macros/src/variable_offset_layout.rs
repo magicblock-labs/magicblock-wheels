@@ -476,7 +476,9 @@ impl FieldLayout {
             Self::Value { value, optional } => {
                 let value_size = usize_lit(value.size());
                 let value_align = usize_lit(value.align());
-                let alignment_check = if matches!(value.access_mode(), AccessMode::Ref) {
+                let alignment_check = if matches!(value.access_mode(), AccessMode::Ref)
+                    && value.align() > 1
+                {
                     quote! {
                         if data_offset % #value_align != 0 {
                             ::pinocchio_log::log!(
