@@ -115,8 +115,8 @@ pub fn fixed_offset_layout(attr: TokenStream, item: TokenStream) -> TokenStream 
 ///       - `None` omits the optional payload entirely
 ///       - `Some(value)` writes only the payload bytes
 ///
-///       The generated `decode_exact()` accepts only the total lengths implied
-///       by the valid combinations of those implicit options.
+///       The generated `decode()` accepts only the total lengths implied by the
+///       valid combinations of those implicit options.
 ///
 ///       Stability note:
 ///
@@ -173,8 +173,8 @@ pub fn fixed_offset_layout(attr: TokenStream, item: TokenStream) -> TokenStream 
 ///     when the layout contains a `Vec` field
 ///
 /// Methods:
-///   - tagged/self-delimiting layouts implement `Decodable`
-///   - `option = implicit` layouts implement only `ExactDecodable`
+///   - all layouts implement `Decodable`
+///   - tagged/self-delimiting layouts also implement `PrefixDecodable`
 ///   - `pub fn encode(&self) -> Result<Vec<u8>, DataLayoutError>`
 ///   - `pub fn encode_to(&self, bytes: &mut [u8]) -> Result<(), DataLayoutError>`
 #[proc_macro_attribute]

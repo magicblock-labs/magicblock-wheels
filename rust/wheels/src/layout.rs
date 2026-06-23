@@ -20,24 +20,24 @@ pub trait Encodable {
 }
 
 ///
-/// Exact-slice decoding for layouts that are not necessarily self-delimiting.
+/// Exact-slice decoding.
 ///
-/// This is required for layouts with implicit `Option` fields, where option
+/// Exact decoding is required for layouts with implicit `Option` fields, where option
 /// presence is inferred from total encoded length. For example, with valid
 /// lengths `[12, 44]`, a 12-byte `None` value plus 32 unrelated bytes is
 /// indistinguishable from a 44-byte `Some` value unless the caller has already
 /// framed the slice.
 ///
-/// Such layouts implement this trait instead of `Decodable` so callers cannot
-/// accidentally parse them as prefixes of a larger buffer.
+/// Layouts that can safely decode from the front of a larger buffer also
+/// implement `PrefixDecodable`.
 ///
-pub trait ExactDecodable {
+pub trait Decodable {
     type View<'a>;
 
     ///
     /// Decodes exactly one value from `bytes`.
     ///
-    fn decode_exact<'a>(bytes: &'a [u8]) -> Result<Self::View<'a>, DataLayoutError>;
+    fn decode<'a>(bytes: &'a [u8]) -> Result<Self::View<'a>, DataLayoutError>;
 }
 
 ///
@@ -45,15 +45,8 @@ pub trait ExactDecodable {
 ///
 /// Implementors can decode one value from the front of a larger buffer.
 ///
-pub trait Decodable {
+pub trait PrefixDecodable {
     type View<'a>;
-
-    ///
-    /// Decodes the first self-delimiting value from `bytes`.
-    ///
-    fn decode<'a>(bytes: &'a [u8]) -> Result<Self::View<'a>, DataLayoutError> {
-        Ok(Self::decode_prefix(bytes)?.0)
-    }
 
     ///
     /// Decodes a prefix and returns the decoded view plus unconsumed bytes.
@@ -61,13 +54,13 @@ pub trait Decodable {
     fn decode_prefix<'a>(bytes: &'a [u8]) -> Result<(Self::View<'a>, &'a [u8]), DataLayoutError>;
 }
 
-impl<T> ExactDecodable for T
+impl<T> Decodable for T
 where
-    T: Decodable,
+    T: PrefixDecodable,
 {
-    type View<'a> = <T as Decodable>::View<'a>;
+    type View<'a> = <T as PrefixDecodable>::View<'a>;
 
-    fn decode_exact<'a>(bytes: &'a [u8]) -> Result<Self::View<'a>, DataLayoutError> {
+    fn decode<'a>(bytes: &'a [u8]) -> Result<Self::View<'a>, DataLayoutError> {
         let (view, remaining) = T::decode_prefix(bytes)?;
         if !remaining.is_empty() {
             return Err(DataLayoutError::InvalidDataLength);

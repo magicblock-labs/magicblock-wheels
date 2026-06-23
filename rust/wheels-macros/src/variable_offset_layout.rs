@@ -177,10 +177,10 @@ pub(crate) fn expand_variable_offset_layout(
     };
     let decodable_impl = if args.option_encoding == StructOptionEncoding::Implicit {
         quote! {
-            impl ::wheels::layout::ExactDecodable for #struct_name {
+            impl ::wheels::layout::Decodable for #struct_name {
                 type View<'a> = #view_name<'a>;
 
-                fn decode_exact<'a>(
+                fn decode<'a>(
                     bytes: &'a [u8]
                 ) -> core::result::Result<Self::View<'a>, ::wheels::DataLayoutError> {
                     let encoded_len = Self::__validate_prefix(bytes)?;
@@ -193,7 +193,7 @@ pub(crate) fn expand_variable_offset_layout(
         }
     } else {
         quote! {
-            impl ::wheels::layout::Decodable for #struct_name {
+            impl ::wheels::layout::PrefixDecodable for #struct_name {
                 type View<'a> = #view_name<'a>;
 
                 fn decode_prefix<'a>(

@@ -2,7 +2,7 @@ extern crate alloc;
 
 use pinocchio::{error::ProgramError, Address};
 use wheels::{
-    layout::{Decodable, Encodable, ExactDecodable},
+    layout::{Decodable, Encodable, PrefixDecodable},
     variable_offset_layout, DataLayoutError, Pubkey,
 };
 
@@ -99,7 +99,7 @@ fn variable_layout_supports_implicit_pubkey_option() {
         .concat()
     );
 
-    let view = ImplicitPubkeyArgs::decode_exact(&some_encoded).unwrap();
+    let view = ImplicitPubkeyArgs::decode(&some_encoded).unwrap();
     assert_eq!(view.shuttle_id(), 100);
     assert_eq!(view.validator(), Some(&Pubkey::from([1; 32])));
     assert_eq!(view.amount(), 200);
@@ -350,7 +350,7 @@ fn variable_layout_decode_prefix_returns_remainder_after_vec_layout() {
 }
 
 #[test]
-fn variable_layout_decode_ignores_trailing_and_decode_exact_rejects_it() {
+fn variable_layout_decode_rejects_trailing_bytes() {
     let mut aligned = Aligned([0; 23]);
     let bytes = &mut aligned.0;
 
@@ -363,15 +363,11 @@ fn variable_layout_decode_ignores_trailing_and_decode_exact_rejects_it() {
     bytes[19..21].copy_from_slice(&0xBEEF_u16.to_le_bytes());
     bytes[21..23].copy_from_slice(&[250, 251]);
 
-    let view = VariableOffsetViewArgs::decode(bytes).unwrap();
-    assert_eq!(view.bytes(), &bytes[..21]);
-    assert_eq!(view.payload(), &[1, 2, 3]);
-
-    let exact_view = VariableOffsetViewArgs::decode_exact(&bytes[..21]).unwrap();
+    let exact_view = VariableOffsetViewArgs::decode(&bytes[..21]).unwrap();
     assert_eq!(exact_view.bytes(), &bytes[..21]);
 
     assert_eq!(
-        VariableOffsetViewArgs::decode_exact(bytes).unwrap_err(),
+        VariableOffsetViewArgs::decode(bytes).unwrap_err(),
         DataLayoutError::InvalidDataLength
     );
 }
@@ -772,12 +768,12 @@ fn variable_layout_supports_implicit_option_without_tag() {
         .concat()
     );
 
-    let none_view = ImplicitOptionArgs::decode_exact(&none_encoded).unwrap();
+    let none_view = ImplicitOptionArgs::decode(&none_encoded).unwrap();
     assert_eq!(none_view.shuttle_id(), 100);
     assert_eq!(none_view.amount(), 200);
     assert_eq!(none_view.validator(), None);
 
-    let some_view = ImplicitOptionArgs::decode_exact(&some_encoded).unwrap();
+    let some_view = ImplicitOptionArgs::decode(&some_encoded).unwrap();
     assert_eq!(some_view.shuttle_id(), 100);
     assert_eq!(some_view.amount(), 200);
     assert_eq!(some_view.validator(), Some(&[1; 32]));
@@ -801,7 +797,7 @@ fn variable_layout_computes_offsets_after_implicit_option() {
         0xBEEF_u16.to_le_bytes().as_slice(),
     ]
     .concat();
-    let none_view = ImplicitOptionWithTrailingArgs::decode_exact(&none_bytes).unwrap();
+    let none_view = ImplicitOptionWithTrailingArgs::decode(&none_bytes).unwrap();
     assert_eq!(none_view.header(), 7);
     assert_eq!(none_view.validator(), None);
     assert_eq!(none_view.amount(), 55);
@@ -814,7 +810,7 @@ fn variable_layout_computes_offsets_after_implicit_option() {
         0xBEEF_u16.to_le_bytes().as_slice(),
     ]
     .concat();
-    let some_view = ImplicitOptionWithTrailingArgs::decode_exact(&some_bytes).unwrap();
+    let some_view = ImplicitOptionWithTrailingArgs::decode(&some_bytes).unwrap();
     assert_eq!(some_view.header(), 7);
     assert_eq!(some_view.validator(), Some([9, 8, 7, 6]));
     assert_eq!(some_view.amount(), 55);
@@ -831,7 +827,7 @@ fn variable_layout_rejects_invalid_implicit_option_length() {
     .concat();
 
     assert_eq!(
-        ImplicitOptionWithTrailingArgs::decode_exact(&bytes).unwrap_err(),
+        ImplicitOptionWithTrailingArgs::decode(&bytes).unwrap_err(),
         DataLayoutError::InvalidDataLength
     );
 }
@@ -879,25 +875,25 @@ fn variable_layout_supports_multiple_implicit_options_with_unique_subset_sums() 
     assert_eq!(both.encode().unwrap().len(), 21);
 
     let none_encoded = none.encode().unwrap();
-    let none_view = MultiImplicitOptionArgs::decode_exact(&none_encoded).unwrap();
+    let none_view = MultiImplicitOptionArgs::decode(&none_encoded).unwrap();
     assert_eq!(none_view.amount(), 11);
     assert_eq!(none_view.split(), 2);
     assert_eq!(none_view.flags(), None);
     assert_eq!(none_view.client_ref_id(), None);
 
     let flags_only_encoded = flags_only.encode().unwrap();
-    let flags_only_view = MultiImplicitOptionArgs::decode_exact(&flags_only_encoded).unwrap();
+    let flags_only_view = MultiImplicitOptionArgs::decode(&flags_only_encoded).unwrap();
     assert_eq!(flags_only_view.flags(), Some(7));
     assert_eq!(flags_only_view.client_ref_id(), None);
 
     let client_ref_id_only_encoded = client_ref_id_only.encode().unwrap();
     let client_ref_id_only_view =
-        MultiImplicitOptionArgs::decode_exact(&client_ref_id_only_encoded).unwrap();
+        MultiImplicitOptionArgs::decode(&client_ref_id_only_encoded).unwrap();
     assert_eq!(client_ref_id_only_view.flags(), None);
     assert_eq!(client_ref_id_only_view.client_ref_id(), Some(99));
 
     let both_encoded = both.encode().unwrap();
-    let both_view = MultiImplicitOptionArgs::decode_exact(&both_encoded).unwrap();
+    let both_view = MultiImplicitOptionArgs::decode(&both_encoded).unwrap();
     assert_eq!(both_view.flags(), Some(7));
     assert_eq!(both_view.client_ref_id(), Some(99));
 }
@@ -928,7 +924,7 @@ fn variable_layout_supports_implicit_option_bool() {
     assert_eq!(some_value.encode().unwrap(), vec![11, 0, 1, 2]);
 
     let some_nonzero_bytes = vec![11, 0, 9, 2];
-    let some_view = ImplicitBoolArgs::decode_exact(&some_nonzero_bytes).unwrap();
+    let some_view = ImplicitBoolArgs::decode(&some_nonzero_bytes).unwrap();
     assert_eq!(some_view.amount(), 11);
     assert_eq!(some_view.gasless(), Some(true));
     assert_eq!(some_view.split(), 2);
