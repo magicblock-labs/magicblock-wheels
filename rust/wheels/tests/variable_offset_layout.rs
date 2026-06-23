@@ -643,6 +643,40 @@ fn variable_layout_buffer_offset_one_allows_unaligned_copy_only_views() {
     assert_eq!(view.counter(), 7);
 }
 
+#[variable_offset_layout(buffer_offset = unaligned)]
+struct UnalignedDynamicArgs {
+    amount: u64,
+    enabled: bool,
+    authority: Pubkey,
+    raw: [u8; 32],
+    #[flexible = 1]
+    payload: Vec<u8>,
+    checksum: u16,
+}
+
+#[test]
+fn variable_layout_unaligned_buffer_offset_decodes_copy_and_alignment_one_views() {
+    let mut aligned = Aligned([0; 80]);
+    let bytes = &mut aligned.0[1..];
+
+    bytes[0..8].copy_from_slice(&55_u64.to_le_bytes());
+    bytes[8] = 1;
+    bytes[9..41].copy_from_slice(&[2; 32]);
+    bytes[41..73].copy_from_slice(&[3; 32]);
+    bytes[73] = 3;
+    bytes[74..77].copy_from_slice(&[4, 5, 6]);
+    bytes[77..79].copy_from_slice(&9_u16.to_le_bytes());
+
+    let view = UnalignedDynamicArgs::decode(&bytes[..79]).unwrap();
+
+    assert_eq!(view.amount(), 55);
+    assert_eq!(view.enabled(), true);
+    assert_eq!(view.authority(), &Pubkey::from([2; 32]));
+    assert_eq!(view.raw(), &[3; 32]);
+    assert_eq!(view.payload(), &[4, 5, 6]);
+    assert_eq!(view.checksum(), 9);
+}
+
 #[variable_offset_layout(buffer_offset = 0)]
 struct BoolArgs {
     enabled: bool,

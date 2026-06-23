@@ -58,15 +58,16 @@ pub fn fixed_offset_layout(attr: TokenStream, item: TokenStream) -> TokenStream 
 /// ==========
 ///
 /// Struct attributes:
-///   - `#[variable_offset_layout(buffer_offset = 0..7)]`
-///   - `#[variable_offset_layout(buffer_offset = 0..7, option = implicit)]`
+///   - `#[variable_offset_layout(buffer_offset = 0..=7)]`
+///   - `#[variable_offset_layout(buffer_offset = unaligned)]`
+///   - `#[variable_offset_layout(buffer_offset = 0..=7, option = implicit)]`
 ///
 ///     - `buffer_offset`
 ///
 ///       Mandatory.
 ///
-///       It specifies the offset of the input slice pointer from the previous
-///       8-byte aligned base address, i.e:
+///       Use `buffer_offset = N` when the input slice always starts at a known
+///       offset from an 8-byte aligned base address:
 ///
 ///       `(bytes.as_ptr() as usize) % 8`
 ///
@@ -76,12 +77,18 @@ pub fn fixed_offset_layout(attr: TokenStream, item: TokenStream) -> TokenStream 
 ///         the payload slice passed to `decode()` is `&input[1..]`, then
 ///         `buffer_offset = 1`.
 ///
-///       The macro uses this contract both at runtime and at compile-time:
+///       Fixed offsets are used both at runtime and at compile-time:
 ///
-///       - `decode()` validates that the actual slice pointer matches
+///       - the generated decoder validates that the actual slice pointer matches
 ///         this offset
 ///       - borrowed getters are only generated when their alignment can be
 ///         guaranteed for every valid encoding under this `buffer_offset`
+///
+///       Use `buffer_offset = unaligned` when the slice may start at any
+///       address, such as when decoding the remaining bytes after
+///       variable-length data. This mode emits no pointer-offset check and
+///       rejects borrowed views whose required alignment is greater than 1.
+///       Copy-decoded fields such as integer primitives remain supported.
 ///
 ///     - `option = implicit`
 ///
