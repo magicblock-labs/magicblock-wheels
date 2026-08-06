@@ -11,7 +11,7 @@ use proc_macro2::Span;
 use quote::{format_ident, quote};
 use syn::{
     parse::Parser, punctuated::Punctuated, spanned::Spanned, Expr, ExprLit, Fields, Ident,
-    ItemStruct, Lit, Meta, Token,
+    ItemStruct, Lit, Meta, Token, Type,
 };
 
 const FIELD_ATTRIBUTES: &[&str] = &["capacity", "flexible"];
@@ -71,14 +71,14 @@ pub(crate) fn expand_variable_offset_layout(
     let mut encoded_len_steps = Vec::new();
     let mut encode_steps = Vec::new();
 
-    let mut min_datalen: usize = 0;
-    let mut max_datalen: usize = 0;
+    let mut min_datalen: Option<usize> = Some(0);
+    let mut max_datalen: Option<usize> = Some(0);
     let mut min_datalen_expr = quote!();
     let mut max_datalen_expr = quote!();
     let mut update_maxmin_datalen =
-        |(slot_min_len_expr, slot_min_len), (slot_max_len_expr, slot_max_len)| {
-            min_datalen += slot_min_len;
-            max_datalen += slot_max_len;
+        |(slot_min_len_expr, slot_min_len): SlotLen, (slot_max_len_expr, slot_max_len): SlotLen| {
+            min_datalen = min_datalen.and_then(|len| slot_min_len.map(|slot_len| len + slot_len));
+            max_datalen = max_datalen.and_then(|len| slot_max_len.map(|slot_len| len + slot_len));
             if min_datalen_expr.is_empty() {
                 min_datalen_expr = slot_min_len_expr;
                 max_datalen_expr = slot_max_len_expr;
@@ -124,7 +124,7 @@ pub(crate) fn expand_variable_offset_layout(
 
         match field_layout.slot_minmax_len() {
             Ok((slot_len_expr, slot_len)) => {
-                offset += slot_len;
+                offset += slot_len.expect("fixed fields have known lengths");
                 update_maxmin_datalen((slot_len_expr.clone(), slot_len), (slot_len_expr, slot_len));
             }
             Err(((slot_min_len_expr, slot_min_len), (slot_max_len_expr, slot_max_len))) => {
@@ -152,9 +152,14 @@ pub(crate) fn expand_variable_offset_layout(
 
     let where_clause = impl_where_clause(&where_bounds);
 
-    let implicit_len_helpers = implicit_len_helpers(min_datalen, &fields.named, &field_layouts)?;
-    let implicit_len_validation =
-        implicit_len_validation(struct_name, min_datalen, &fields.named, &field_layouts)?;
+    let implicit_len_helpers =
+        implicit_len_helpers(min_datalen.unwrap_or(0), &fields.named, &field_layouts)?;
+    let implicit_len_validation = implicit_len_validation(
+        struct_name,
+        min_datalen.unwrap_or(0),
+        &fields.named,
+        &field_layouts,
+    )?;
 
     let public_len_const = public_len_const(
         min_datalen_expr.clone(),
@@ -205,6 +210,14 @@ pub(crate) fn expand_variable_offset_layout(
                 }
             }
         }
+    };
+    let fixed_size_layout_impl = match exact_data_lens(&field_layouts) {
+        Some(exact_lens) if exact_lens.len() == 1 => quote! {
+            impl ::wheels::layout::FixedSizeLayout for #struct_name {
+                const DATA_LEN: usize = #struct_name::DATA_LEN;
+            }
+        },
+        _ => quote!(),
     };
 
     Ok(quote! {
@@ -313,6 +326,8 @@ pub(crate) fn expand_variable_offset_layout(
 
         #decodable_impl
 
+        #fixed_size_layout_impl
+
         #[allow(dead_code)]
         #[derive(Debug)]
         pub struct #view_name<'a> {
@@ -375,9 +390,54 @@ enum FieldLayout {
         optional: OptionalKind,
     },
     Vec {
-        elem: FixedValueKind,
+        elem: VecElementKind,
         flexible: Flexible,
     },
+}
+
+#[derive(Clone)]
+enum VecElementKind {
+    FixedValue(FixedValueKind),
+    FixedSizeLayout { ty: Type },
+}
+
+impl VecElementKind {
+    fn ty(&self) -> &Type {
+        match self {
+            Self::FixedValue(value) => value.ty(),
+            Self::FixedSizeLayout { ty } => ty,
+        }
+    }
+
+    fn size_expr(&self) -> proc_macro2::TokenStream {
+        match self {
+            Self::FixedValue(value) => value.size_expr(),
+            Self::FixedSizeLayout { ty } => {
+                quote!(<#ty as ::wheels::layout::FixedSizeLayout>::DATA_LEN)
+            }
+        }
+    }
+
+    fn known_size(&self) -> Option<usize> {
+        match self {
+            Self::FixedValue(value) => Some(value.size()),
+            Self::FixedSizeLayout { .. } => None,
+        }
+    }
+
+    fn borrowed_slice_alignment(&self) -> Option<usize> {
+        match self {
+            Self::FixedValue(value) => Some(value.align()),
+            Self::FixedSizeLayout { .. } => None,
+        }
+    }
+
+    fn needs_pod_bound(&self) -> bool {
+        match self {
+            Self::FixedValue(value) => value.needs_pod_bound(),
+            Self::FixedSizeLayout { .. } => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -387,7 +447,7 @@ enum OptionalKind {
     Implicit(usize),
 }
 
-type SlotLen = (proc_macro2::TokenStream, usize);
+type SlotLen = (proc_macro2::TokenStream, Option<usize>);
 type SlotMinMaxLen = Result<SlotLen, (SlotLen, SlotLen)>;
 
 impl FieldLayout {
@@ -403,25 +463,26 @@ impl FieldLayout {
             Self::Value { value, optional } => {
                 let value_size_expr = value.size_expr();
                 match optional {
-                    OptionalKind::No => Ok((value_size_expr, value.size())),
+                    OptionalKind::No => Ok((value_size_expr, Some(value.size()))),
                     OptionalKind::Tagged => Err((
-                        (quote!(1), 1),
-                        (quote!((1 + #value_size_expr)), 1 + value.size()),
+                        (quote!(1), Some(1)),
+                        (quote!((1 + #value_size_expr)), Some(1 + value.size())),
                     )),
                     OptionalKind::Implicit(_) => {
-                        Err(((quote!(0), 0), (value_size_expr, value.size())))
+                        Err(((quote!(0), Some(0)), (value_size_expr, Some(value.size()))))
                     }
                 }
             }
             Self::Vec { elem, flexible } => {
-                let elem_ty = elem.ty();
+                let elem_size_expr = elem.size_expr();
                 let len_width_lit = usize_lit(flexible.len_width);
                 let capacity_lit = usize_lit(flexible.capacity());
                 Err((
-                    (quote!(#len_width_lit), flexible.len_width),
+                    (quote!(#len_width_lit), Some(flexible.len_width)),
                     (
-                        quote!(#len_width_lit + core::mem::size_of::<#elem_ty>() * #capacity_lit),
-                        flexible.len_width + elem.size() * flexible.capacity(),
+                        quote!(#len_width_lit + #elem_size_expr * #capacity_lit),
+                        elem.known_size()
+                            .map(|elem_size| flexible.len_width + elem_size * flexible.capacity()),
                     ),
                 ))
             }
@@ -445,7 +506,7 @@ impl FieldLayout {
                 }
             }
             Self::Vec { elem, flexible } => {
-                let elem_size = usize_lit(elem.size());
+                let elem_size = elem.size_expr();
                 let len_width = usize_lit(flexible.len_width);
                 let capacity = usize_lit(flexible.capacity());
                 quote! {
@@ -572,8 +633,7 @@ impl FieldLayout {
                 }
             }
             Self::Vec { elem, flexible } => {
-                let elem_size = usize_lit(elem.size());
-                let elem_align = usize_lit(elem.align());
+                let elem_size = elem.size_expr();
                 let len_width_lit = usize_lit(flexible.len_width);
                 let len_expr = checked_read_len_expr(
                     quote!(bytes),
@@ -582,47 +642,58 @@ impl FieldLayout {
                     flexible.capacity(),
                     &field_name,
                 );
-                let alignment_check = if elem.align() > 1 {
-                    quote! {
-                        if len != 0 && data_offset % #elem_align != 0 {
-                            ::pinocchio_log::log!(
-                                "Invalid alignment for field {}: element data starts at offset {}, expected {}-byte alignment",
-                                #field_name,
-                                data_offset,
-                                #elem_align,
-                            );
-                            return Err(::wheels::DataLayoutError::InvalidFieldAlignment);
+                let alignment_check = match elem.borrowed_slice_alignment() {
+                    Some(align) if align > 1 => {
+                        let elem_align = usize_lit(align);
+                        quote! {
+                            if len != 0 && data_offset % #elem_align != 0 {
+                                ::pinocchio_log::log!(
+                                    "Invalid alignment for field {}: element data starts at offset {}, expected {}-byte alignment",
+                                    #field_name,
+                                    data_offset,
+                                    #elem_align,
+                                );
+                                return Err(::wheels::DataLayoutError::InvalidFieldAlignment);
+                            }
                         }
                     }
-                } else {
-                    quote!()
+                    _ => quote!(),
+                };
+                let element_validation = match elem {
+                    VecElementKind::FixedValue(_) => quote!(),
+                    VecElementKind::FixedSizeLayout { ty } => quote! {
+                        let _ = ::wheels::layout::LayoutSlice::<#ty>::new(
+                            &bytes[data_offset..end],
+                        )?;
+                    },
                 };
 
                 quote! {
-                    let data_offset = offset + #len_width_lit;
-                    if data_offset > bytes.len() {
-                        ::pinocchio_log::log!(
-                            "Missing length header for field {} at offset {}",
-                            #field_name,
-                            offset,
-                        );
-                        return Err(::wheels::DataLayoutError::MissingLengthHeader);
-                    }
+                let data_offset = offset + #len_width_lit;
+                if data_offset > bytes.len() {
+                    ::pinocchio_log::log!(
+                        "Missing length header for field {} at offset {}",
+                        #field_name,
+                        offset,
+                    );
+                    return Err(::wheels::DataLayoutError::MissingLengthHeader);
+                }
 
-                    let len = #len_expr;
-                    #alignment_check
+                let len = #len_expr;
+                #alignment_check
 
-                    let end = data_offset + len * #elem_size;
-                    if end > bytes.len() {
-                        ::pinocchio_log::log!(
-                            "Truncated Vec payload for field {}: need {} bytes, have {}",
-                            #field_name,
-                            end,
-                            bytes.len(),
-                        );
+                let end = data_offset + len * #elem_size;
+                if end > bytes.len() {
+                    ::pinocchio_log::log!(
+                        "Truncated Vec payload for field {}: need {} bytes, have {}",
+                        #field_name,
+                        end,
+                        bytes.len(),
+                    );
                         return Err(::wheels::DataLayoutError::TruncatedVectorPayload);
                     }
 
+                    #element_validation
                     offset = end;
                 }
             }
@@ -709,20 +780,42 @@ impl FieldLayout {
                 }
             }
             Self::Vec { elem, flexible } => {
-                let elem_size = usize_lit(elem.size());
+                let elem_size = elem.size_expr();
                 let len_width = usize_lit(flexible.len_width);
-                quote! {
-                    let field_len = self.#field_ident.len();
-                    let len_header = (field_len as u64).to_le_bytes();
-                    bytes[offset..offset + #len_width]
-                        .copy_from_slice(&len_header[..#len_width]);
-                    let start = offset + #len_width;
-                    let end = start + field_len * #elem_size;
-                    if field_len != 0 {
-                        bytes[start..end]
-                            .copy_from_slice(::bytemuck::cast_slice(self.#field_ident.as_slice()));
-                    }
-                    offset = end;
+                match elem {
+                    VecElementKind::FixedValue(_) => quote! {
+                        let field_len = self.#field_ident.len();
+                        let len_header = (field_len as u64).to_le_bytes();
+                        bytes[offset..offset + #len_width]
+                            .copy_from_slice(&len_header[..#len_width]);
+                        let start = offset + #len_width;
+                        let end = start + field_len * #elem_size;
+                        if field_len != 0 {
+                            bytes[start..end]
+                                .copy_from_slice(::bytemuck::cast_slice(self.#field_ident.as_slice()));
+                        }
+                        offset = end;
+                    },
+                    VecElementKind::FixedSizeLayout { .. } => quote! {
+                        let field_len = self.#field_ident.len();
+                        let len_header = (field_len as u64).to_le_bytes();
+                        bytes[offset..offset + #len_width]
+                            .copy_from_slice(&len_header[..#len_width]);
+                        let start = offset + #len_width;
+                        let end = start + field_len * #elem_size;
+                        for (index, value) in self.#field_ident.iter().enumerate() {
+                            let element_start = start + index * #elem_size;
+                            let element_end = element_start + #elem_size;
+                            let remaining = ::wheels::layout::Encodable::encode_to(
+                                value,
+                                &mut bytes[element_start..element_end],
+                            )?;
+                            if !remaining.is_empty() {
+                                return Err(::wheels::DataLayoutError::InvalidDataLength);
+                            }
+                        }
+                        offset = end;
+                    },
                 }
             }
         }
@@ -739,11 +832,15 @@ impl FieldLayout {
                 }
             }
             Self::Vec { elem, .. } => {
-                if elem.needs_pod_bound() {
-                    let ty = elem.ty();
-                    Some(quote!(#ty: ::bytemuck::Pod))
-                } else {
-                    None
+                let ty = elem.ty();
+                match elem {
+                    VecElementKind::FixedValue(_) if elem.needs_pod_bound() => {
+                        Some(quote!(#ty: ::bytemuck::Pod))
+                    }
+                    VecElementKind::FixedSizeLayout { .. } => {
+                        Some(quote!(#ty: ::wheels::layout::FixedSizeLayout))
+                    }
+                    _ => None,
                 }
             }
         }
@@ -1038,7 +1135,7 @@ impl FieldLayout {
             }
             Self::Vec { elem, flexible } => {
                 let elem_ty = elem.ty();
-                let elem_size = usize_lit(elem.size());
+                let elem_size = elem.size_expr();
                 let len_width_lit = usize_lit(flexible.len_width);
                 let len_expr = validated_len_expr(
                     struct_name,
@@ -1048,18 +1145,32 @@ impl FieldLayout {
                 );
 
                 let offset_expr = find_data_offset(struct_name, field_offsets);
-                Ok(quote! {
-                    pub fn #field_ident(&self) -> &[#elem_ty] {
-                        let offset = #offset_expr;
-                        let len = #len_expr;
-                        if len == 0 {
-                            return &[];
+                match elem {
+                    VecElementKind::FixedValue(_) => Ok(quote! {
+                        pub fn #field_ident(&self) -> &[#elem_ty] {
+                            let offset = #offset_expr;
+                            let len = #len_expr;
+                            if len == 0 {
+                                return &[];
+                            }
+                            let start = offset + #len_width_lit;
+                            let end = start + len * #elem_size;
+                            ::bytemuck::cast_slice::<u8, #elem_ty>(&self.bytes[start..end])
                         }
-                        let start = offset + #len_width_lit;
-                        let end = start + len * #elem_size;
-                        ::bytemuck::cast_slice::<u8, #elem_ty>(&self.bytes[start..end])
-                    }
-                })
+                    }),
+                    VecElementKind::FixedSizeLayout { .. } => Ok(quote! {
+                        pub fn #field_ident(
+                            &self,
+                        ) -> ::wheels::layout::LayoutSlice<'a, #elem_ty> {
+                            let offset = #offset_expr;
+                            let len = #len_expr;
+                            let start = offset + #len_width_lit;
+                            let end = start + len * #elem_size;
+                            ::wheels::layout::LayoutSlice::new(&self.bytes[start..end])
+                                .expect("validated fixed-size layout Vec")
+                        }
+                    }),
+                }
             }
         }
     }
@@ -1089,10 +1200,25 @@ fn parse_field_layout(
         let flexible = match attribute {
             FieldAttribute::Flexible(len_width) => Flexible { len_width },
         };
-        return Ok(FieldLayout::Vec {
-            elem: parse_value_kind(elem_ty, UNSUPPORTED_FIELD_MESSAGE)?,
-            flexible,
-        });
+        let elem = if vec_inner(elem_ty, LAYOUT_NAME)?.is_some() {
+            return Err(syn::Error::new_spanned(
+                elem_ty,
+                "Vec<Vec<T>> is not supported by variable_offset_layout",
+            ));
+        } else if is_string(elem_ty) {
+            return Err(syn::Error::new_spanned(
+                elem_ty,
+                "String is not supported by variable_offset_layout",
+            ));
+        } else {
+            match parse_value_kind(elem_ty, UNSUPPORTED_FIELD_MESSAGE) {
+                Ok(value) => VecElementKind::FixedValue(value),
+                Err(_) => VecElementKind::FixedSizeLayout {
+                    ty: elem_ty.clone(),
+                },
+            }
+        };
+        return Ok(FieldLayout::Vec { elem, flexible });
     }
 
     if attribute.is_some() {
@@ -1452,9 +1578,9 @@ fn exact_data_lens(layouts: &[FieldLayout]) -> Option<Vec<usize>> {
 
 fn public_len_const(
     min_datalen_expr: proc_macro2::TokenStream,
-    min_datalen: usize,
+    min_datalen: Option<usize>,
     max_datalen_expr: proc_macro2::TokenStream,
-    max_datalen: usize,
+    max_datalen: Option<usize>,
     layouts: &[FieldLayout],
 ) -> syn::Result<proc_macro2::TokenStream> {
     if let Some(exact_lens) = exact_data_lens(layouts) {
@@ -1476,10 +1602,15 @@ fn public_len_const(
         });
     }
 
-    let doc = format!(
-        "Valid encoded size range = ({}, {})",
-        min_datalen, max_datalen
-    );
+    let doc = match (min_datalen, max_datalen) {
+        (Some(min_datalen), Some(max_datalen)) => {
+            format!(
+                "Valid encoded size range = ({}, {})",
+                min_datalen, max_datalen
+            )
+        }
+        _ => "Valid encoded size range is represented by DATA_LEN_RANGE".to_string(),
+    };
     Ok(quote! {
         #[doc = #doc]
         pub const DATA_LEN_RANGE: (usize, usize) = (#min_datalen_expr, #max_datalen_expr);
@@ -1488,8 +1619,8 @@ fn public_len_const(
 
 fn data_len_validation(
     struct_name: &Ident,
-    min_datalen: usize,
-    max_datalen: usize,
+    min_datalen: Option<usize>,
+    max_datalen: Option<usize>,
     layouts: &[FieldLayout],
 ) -> syn::Result<proc_macro2::TokenStream> {
     if let Some(exact_lens) = exact_data_lens(layouts) {
@@ -1521,10 +1652,16 @@ fn data_len_validation(
         });
     }
 
-    let msg = format!(
-        "bytes [len={{}}] cannot be deserialized to {} which needs at least {} and at most {} bytes",
-        struct_name, min_datalen, max_datalen
-    );
+    let msg = match (min_datalen, max_datalen) {
+        (Some(min_datalen), Some(max_datalen)) => format!(
+            "bytes [len={{}}] cannot be deserialized to {} which needs at least {} and at most {} bytes",
+            struct_name, min_datalen, max_datalen
+        ),
+        _ => format!(
+            "bytes [len={{}}] cannot be deserialized to {} because it is outside the valid size range",
+            struct_name,
+        ),
+    };
     Ok(quote! {
         if bytes.len() < Self::__MIN_DATA_LEN || bytes.len() > Self::__MAX_DATA_LEN {
             ::pinocchio_log::log!(
@@ -1756,12 +1893,13 @@ fn borrowed_requirement(layout: &FieldLayout) -> Option<BorrowedRequirement> {
                 optional_kind: *optional,
             }),
         },
-        FieldLayout::Vec { elem, flexible } => {
-            (elem.align() > 1).then_some(BorrowedRequirement::Vec {
-                align: elem.align(),
+        FieldLayout::Vec { elem, flexible } => elem
+            .borrowed_slice_alignment()
+            .filter(|align| *align > 1)
+            .map(|align| BorrowedRequirement::Vec {
+                align,
                 len_width: flexible.len_width,
-            })
-        }
+            }),
     }
 }
 
@@ -1769,7 +1907,8 @@ fn exact_start_offset(layouts: &[FieldLayout]) -> Option<usize> {
     let mut offset = 0usize;
     for layout in layouts {
         match layout.slot_minmax_len() {
-            Ok((_, len)) => offset += len,
+            Ok((_, Some(len))) => offset += len,
+            Ok((_, None)) => return None,
             Err(_) => return None,
         }
     }
@@ -1810,12 +1949,15 @@ fn possible_len_residues(layout: &FieldLayout, modulus: usize) -> BTreeSet<usize
             OptionalKind::Implicit(_) => BTreeSet::from([0, value.size() % modulus]),
         },
         FieldLayout::Vec { elem, flexible } => {
+            let Some(elem_size) = elem.known_size() else {
+                return (0..modulus).collect();
+            };
             let capacity = flexible.capacity();
-            let period = modulus / gcd(modulus, elem.size());
+            let period = modulus / gcd(modulus, elem_size);
             let max_k = capacity.min(period.saturating_sub(1));
             let mut residues = BTreeSet::new();
             for k in 0..=max_k {
-                residues.insert((flexible.len_width + k * elem.size()) % modulus);
+                residues.insert((flexible.len_width + k * elem_size) % modulus);
             }
             residues
         }
@@ -1978,7 +2120,7 @@ fn find_data_offset(
                                 }
                         }
                         FieldLayout::Vec { elem, flexible } => {
-                            let elem_size = usize_lit(elem.size());
+                            let elem_size = elem.size_expr();
                             let len_width = usize_lit(flexible.len_width);
                             let len_expr = validated_len_expr(
                                 struct_name,
@@ -2009,7 +2151,7 @@ fn find_data_offset(
                             }
                         }
                         FieldLayout::Vec { elem, flexible } => {
-                            let elem_size = usize_lit(elem.size());
+                            let elem_size = elem.size_expr();
                             let len_width = usize_lit(flexible.len_width);
                             let len_expr = validated_len_expr(
                                 struct_name,

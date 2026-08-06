@@ -44,12 +44,15 @@ pub(crate) fn expand_fixed_offset_layout(
 
     let mut total_len_expr = quote!();
     let mut fields_encode_expr = quote!();
+    let mut layout_fields_encode_expr = quote!();
 
     let mut where_bounds = Vec::<proc_macro2::TokenStream>::new();
     let mut view_methods = Vec::new();
 
     let mut validate_steps = Vec::new();
+    let mut layout_validate_steps = Vec::new();
     let mut layout_error: Option<syn::Error> = None;
+    let mut required_alignment = 1usize;
 
     let mut flexible_field = None;
     let field_count = fields.named.len();
@@ -81,10 +84,24 @@ pub(crate) fn expand_fixed_offset_layout(
             }
         }
 
+        required_alignment = required_alignment.max(layout.borrowed_alignment());
+
         validate_steps.push(layout.gen_validate_vec_len(offset, field_ident));
+        layout_validate_steps.push(layout.gen_validate_vec_len_for_layout(offset, field_ident));
         view_methods.push(layout.gen_view_methods(offset, field_ident)?);
 
-        fields_encode_expr = layout.gen_field_encode(fields_encode_expr, offset, field_ident);
+        fields_encode_expr = layout.gen_field_encode(
+            fields_encode_expr,
+            offset,
+            field_ident,
+            quote!(::pinocchio::error::ProgramError::InvalidRealloc),
+        );
+        layout_fields_encode_expr = layout.gen_field_encode(
+            layout_fields_encode_expr,
+            offset,
+            field_ident,
+            quote!(::wheels::DataLayoutError::LengthExceedsCapacity),
+        );
 
         if let Some(bound) = layout.bound() {
             where_bounds.push(bound);
@@ -144,6 +161,8 @@ pub(crate) fn expand_fixed_offset_layout(
     let where_clause = impl_where_clause(&where_bounds);
 
     let msg = format!("Sum of encodable-sizes must be {}.", datalen);
+    let has_flexible_field = flexible_field.is_some();
+    let required_alignment_lit = usize_lit(required_alignment);
 
     let (datalen_vars, datalen_check, check_logfmt, encoding_buf_var, encoding_ret_ty) =
         if let Some((flexible_field, comptime_optlen)) = flexible_field {
@@ -185,6 +204,53 @@ pub(crate) fn expand_fixed_offset_layout(
                 quote!([u8; #datalen]),
             )
         };
+    let layout_trait_impls = if has_flexible_field {
+        quote!()
+    } else {
+        quote! {
+            impl ::wheels::layout::Encodable for #struct_name {
+                fn encoded_len(
+                    &self,
+                ) -> core::result::Result<usize, ::wheels::DataLayoutError> {
+                    Ok(#struct_name::DATA_LEN)
+                }
+
+                fn encode_to<'a>(
+                    &self,
+                    out: &'a mut [u8],
+                ) -> core::result::Result<&'a mut [u8], ::wheels::DataLayoutError> {
+                    if out.len() < #struct_name::DATA_LEN {
+                        ::pinocchio_log::log!(
+                            "bytes [len={}] are too small to encode {} which needs {} bytes",
+                            out.len(),
+                            stringify!(#struct_name),
+                            #struct_name::DATA_LEN,
+                        );
+                        return Err(::wheels::DataLayoutError::OutputBufferTooSmall);
+                    }
+
+                    let (bytes, remaining) = out.split_at_mut(#struct_name::DATA_LEN);
+                    #layout_fields_encode_expr;
+                    Ok(remaining)
+                }
+            }
+
+            impl ::wheels::layout::Decodable for #struct_name {
+                type View<'a> = #view_name<'a>;
+
+                fn decode<'a>(
+                    bytes: &'a [u8],
+                ) -> core::result::Result<Self::View<'a>, ::wheels::DataLayoutError> {
+                    Self::__validate_layout_bytes(bytes)?;
+                    Ok(#view_name { bytes })
+                }
+            }
+
+            impl ::wheels::layout::FixedSizeLayout for #struct_name {
+                const DATA_LEN: usize = #struct_name::DATA_LEN;
+            }
+        }
+    };
 
     Ok(quote! {
         #emitted_input
@@ -223,14 +289,44 @@ pub(crate) fn expand_fixed_offset_layout(
                     return Err(
                         ::pinocchio::error::ProgramError::InvalidInstructionData,
                     );
-                } else if bytes.as_ptr().align_offset(8) != 0 {
-                    ::pinocchio_log::log!("bytes [align_offset={}] cannot be deserialized to {} which requires 8-byte alignment", bytes.as_ptr().align_offset(8), stringify!(#struct_name));
+                } else if #required_alignment_lit > 1
+                    && bytes.as_ptr().align_offset(#required_alignment_lit) != 0
+                {
+                    ::pinocchio_log::log!(
+                        "bytes [align_offset={}] cannot be deserialized to {} which requires {}-byte alignment",
+                        bytes.as_ptr().align_offset(#required_alignment_lit),
+                        stringify!(#struct_name),
+                        #required_alignment_lit,
+                    );
                     return Err(
                         ::pinocchio::error::ProgramError::InvalidInstructionData,
                     );
                 }
 
                 #(#validate_steps)*
+
+                Ok(())
+            }
+
+            fn __validate_layout_bytes(
+                bytes: &[u8],
+            ) -> core::result::Result<(), ::wheels::DataLayoutError> {
+                if #datalen_check {
+                    ::pinocchio_log::log!(#check_logfmt, bytes.len());
+                    return Err(::wheels::DataLayoutError::InvalidDataLength);
+                } else if #required_alignment_lit > 1
+                    && bytes.as_ptr().align_offset(#required_alignment_lit) != 0
+                {
+                    ::pinocchio_log::log!(
+                        "bytes [align_offset={}] cannot be deserialized to {} which requires {}-byte alignment",
+                        bytes.as_ptr().align_offset(#required_alignment_lit),
+                        stringify!(#struct_name),
+                        #required_alignment_lit,
+                    );
+                    return Err(::wheels::DataLayoutError::InvalidFieldAlignment);
+                }
+
+                #(#layout_validate_steps)*
 
                 Ok(())
             }
@@ -246,6 +342,22 @@ pub(crate) fn expand_fixed_offset_layout(
                     tag => {
                         ::pinocchio_log::log!("Invalid Option tag for field {}::{} : tag = {} (which should be either 0 or 1)", stringify!(#struct_name), field_name, tag);
                         return Err(::pinocchio::error::ProgramError::InvalidInstructionData);
+                    }
+                }
+                Ok(())
+            }
+
+            fn __validate_option_for_layout(
+                bytes: &[u8],
+                offset: usize,
+                field_name: &'static str,
+            ) -> core::result::Result<(), ::wheels::DataLayoutError> {
+                match bytes[offset] {
+                    0 | 1 => {}
+
+                    tag => {
+                        ::pinocchio_log::log!("Invalid Option tag for field {}::{} : tag = {} (which should be either 0 or 1)", stringify!(#struct_name), field_name, tag);
+                        return Err(::wheels::DataLayoutError::InvalidOptionTag);
                     }
                 }
                 Ok(())
@@ -274,7 +386,33 @@ pub(crate) fn expand_fixed_offset_layout(
                 }
                 Ok(())
             }
+
+            fn __validate_vec_len_for_layout(
+                bytes: &[u8],
+                offset: usize,
+                capacity: usize,
+                len_width: usize,
+                field_name: &'static str,
+            ) -> core::result::Result<(), ::wheels::DataLayoutError> {
+                let len = match len_width {
+                    1 =>  bytes[offset] as usize,
+                    2 => {
+                        let raw: [u8; 2] =bytes[offset..offset + 2].try_into().expect("validated len");
+                        u16::from_le_bytes(raw) as usize
+                    },
+                    _ => {
+                        unreachable!()
+                    }
+                };
+                if len > capacity {
+                    ::pinocchio_log::log!("Invalid Vec length for field {}::{} : capacity = {}, len = {}", stringify!(#struct_name), field_name, capacity, len);
+                    return Err(::wheels::DataLayoutError::LengthExceedsCapacity);
+                }
+                Ok(())
+            }
         }
+
+        #layout_trait_impls
 
         #[allow(dead_code)]
         #[derive(Debug)]
@@ -336,6 +474,16 @@ struct PaddingIssue {
 }
 
 impl FixedFieldKind {
+    fn borrowed_alignment(&self) -> usize {
+        match self {
+            Self::Value { value, .. } => match value.access_mode() {
+                AccessMode::Copy => 1,
+                AccessMode::Ref => value.align(),
+            },
+            Self::Vec { elem, .. } => elem.align(),
+        }
+    }
+
     fn slot_min_len_expr(&self) -> Result<(proc_macro2::TokenStream, usize), ComptimeOptionalLen> {
         match self {
             Self::Value { value, optional } => {
@@ -492,6 +640,34 @@ impl FixedFieldKind {
     }
 
     fn gen_validate_vec_len(&self, offset: usize, field_ident: &Ident) -> proc_macro2::TokenStream {
+        self.gen_validate_vec_len_with_fns(
+            offset,
+            field_ident,
+            quote!(__validate_option),
+            quote!(__validate_vec_len),
+        )
+    }
+
+    fn gen_validate_vec_len_for_layout(
+        &self,
+        offset: usize,
+        field_ident: &Ident,
+    ) -> proc_macro2::TokenStream {
+        self.gen_validate_vec_len_with_fns(
+            offset,
+            field_ident,
+            quote!(__validate_option_for_layout),
+            quote!(__validate_vec_len_for_layout),
+        )
+    }
+
+    fn gen_validate_vec_len_with_fns(
+        &self,
+        offset: usize,
+        field_ident: &Ident,
+        option_fn: proc_macro2::TokenStream,
+        vec_len_fn: proc_macro2::TokenStream,
+    ) -> proc_macro2::TokenStream {
         let field_name = field_ident.to_string();
         let offset_lit = usize_lit(offset);
         let offset_expr = quote!(#offset_lit);
@@ -499,7 +675,7 @@ impl FixedFieldKind {
             Self::Value { optional, .. } => {
                 if optional.is_some() {
                     quote! {
-                        Self::__validate_option(bytes, #offset_expr, #field_name)?;
+                        Self::#option_fn(bytes, #offset_expr, #field_name)?;
                     }
                 } else {
                     quote! {}
@@ -511,7 +687,7 @@ impl FixedFieldKind {
                     .unwrap_or(usize_lit(MAX_CAPACITY));
                 let len_width_lit = capacity.len_width_lit();
                 quote! {
-                    Self::__validate_vec_len(bytes, #offset_expr, #capacity_lit, #len_width_lit, #field_name)?;
+                    Self::#vec_len_fn(bytes, #offset_expr, #capacity_lit, #len_width_lit, #field_name)?;
                 }
             }
         }
@@ -522,6 +698,7 @@ impl FixedFieldKind {
         fields_encode_expr: proc_macro2::TokenStream,
         offset: usize,
         field_ident: &Ident,
+        capacity_error: proc_macro2::TokenStream,
     ) -> proc_macro2::TokenStream {
         let offset = usize_lit(offset);
         match self {
@@ -593,7 +770,7 @@ impl FixedFieldKind {
                         #fields_encode_expr
 
                         if self.#field_ident.len() > #cap {
-                            return Err(::pinocchio::error::ProgramError::InvalidRealloc);
+                            return Err(#capacity_error);
                         }
 
                         bytes[#offset..#offset + #len_width].copy_from_slice(::bytemuck::bytes_of(&(self.#field_ident.len() as #len_width_ty)));
@@ -609,7 +786,7 @@ impl FixedFieldKind {
                         #fields_encode_expr
 
                         if self.#field_ident.len() > #max_capacity {
-                            return Err(::pinocchio::error::ProgramError::InvalidRealloc);
+                            return Err(#capacity_error);
                         } else if !self.#field_ident.is_empty() {
                             bytes[#offset..#offset + #len_width].copy_from_slice(::bytemuck::bytes_of(&(self.#field_ident.len() as #len_width_ty)));
                             bytes[#offset + #len_width..#offset + #len_width + self.#field_ident.len() * #elem_size].copy_from_slice(::bytemuck::cast_slice(&self.#field_ident.as_slice()));
