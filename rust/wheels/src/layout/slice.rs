@@ -1,28 +1,30 @@
 use super::{Decodable, FixedSizeLayout};
 use crate::DataLayoutError;
 
+///
 /// Borrowed view over a `Vec<T>` field whose elements are fixed-size layouts.
 ///
 /// Users do not write this type in their layout structs. They continue to write
-/// `Vec<T>`. The macros return `LayoutSlice<'a, T>` from generated view getters
-/// because encoded layout elements are stored as bytes and are decoded into
-/// `T::View<'a>` on access.
+/// `Vec<T>`. For supported scalar/POD element types, generated getters return
+/// `&[T]`. For user-defined layout element types, generated getters return
+/// `LayoutSlice<'a, T>` so callers can access each element as `T::View<'a>`.
 ///
 /// # Why it exists
 ///
 /// - Users continue to write `Vec<T>` in layout structs.
-/// - Generated views cannot return `&[T]`, because encoded layout bytes are not
-///   Rust `T` values.
+/// - Generated views can return `&[T]` for supported scalar/POD element types,
+///   but not for user-defined layout types whose public decoded form is
+///   `T::View<'a>`.
 /// - Generated views should still expose collection-like access through `len`,
 ///   `is_empty`, `get`, `iter`, and `as_bytes`.
 /// - `LayoutSlice` adapts a `variable_offset_layout` Vec payload into borrowed
 ///   `T::View<'a>` values without allocation.
 ///
-/// For library authors: this type models only the active payload bytes for a
-/// `Vec<T>` inside `variable_offset_layout`, where there is no reserved capacity
-/// beyond the encoded length. It intentionally does not model fixed-offset Vec
-/// slots, because those have both a logical `len` and a schema-level `capacity`
-/// with reserved trailing storage.
+/// A `LayoutSlice` contains only the active Vec payload: exactly `len * T::DATA_LEN`
+/// bytes. There is no reserved capacity beyond the encoded length. This differs from
+/// a Vec field in `fixed_offset_layout`, which has both a logical `len` and a
+/// schema-level `capacity` with reserved trailing storage.
+///
 #[derive(Clone, Copy, Debug)]
 pub struct LayoutSlice<'a, T>
 where
