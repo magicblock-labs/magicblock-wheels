@@ -1,7 +1,15 @@
 use crate::DataLayoutError;
 
+mod slice;
+
+pub use slice::{LayoutSlice, LayoutSliceIter};
+
 pub trait DataLayoutKind {
     const IS_FIXED: bool;
+}
+
+pub trait FixedSizeLayout: Encodable + Decodable {
+    const DATA_LEN: usize;
 }
 
 pub trait Encodable {
