@@ -52,7 +52,7 @@ pub(crate) fn expand_fixed_offset_layout(
     let mut layout_error: Option<syn::Error> = None;
     let mut required_alignment = 1usize;
 
-    let mut flexible_field = None;
+    let mut trailing_flexible_field = None;
     let field_count = fields.named.len();
     for (index, field) in fields.named.iter_mut().enumerate() {
         let field_ident = field.ident.as_ref().expect("named field");
@@ -109,7 +109,7 @@ pub(crate) fn expand_fixed_offset_layout(
                 // the last offset becomes datalen which in this case is MIN_DATA_LEN
                 offsets.push(*offsets.last().unwrap());
 
-                flexible_field = Some((field_ident, len_width));
+                trailing_flexible_field = Some((field_ident, len_width));
                 // total_len_expr = if total_len_expr.is_empty() {
                 //     quote!(#len_width)
                 // } else {
@@ -147,76 +147,77 @@ pub(crate) fn expand_fixed_offset_layout(
     let where_clause = impl_where_clause(&where_bounds);
 
     let msg = format!("Sum of encodable-sizes must be {}.", datalen);
-    let has_flexible_field = flexible_field.is_some();
+    let has_trailing_flexible_field = trailing_flexible_field.is_some();
     let required_alignment_lit = usize_lit(required_alignment);
 
     let min_datalen_lit = usize_lit(datalen);
-    let (datalen_vars, datalen_check, check_logfmt, encoded_len_expr) = match flexible_field {
-        Some((flexible_field, comptime_optlen)) => {
-            let max_datalen_value = datalen + comptime_optlen.max_datalen();
-            let max_datalen = usize_lit(max_datalen_value);
-            let logfmt = format!(
-            "bytes [len={{}}] cannot be deserialized to {} which needs at least {} or at most {} bytes",
-            struct_name, datalen, max_datalen_value
-        );
-            let encoded_len_expr = match comptime_optlen {
-                ComptimeOptionalLen::ArrayLen {
-                    len_width,
-                    elem_size,
-                } => {
-                    let max_capacity = usize_lit(2usize.pow(len_width as u32 * 8) - 1);
-                    let len_width = usize_lit(len_width);
-                    let elem_size = usize_lit(elem_size);
-                    quote! {
-                        let field_len = self.#flexible_field.len();
-                        if field_len > #max_capacity {
-                            ::pinocchio_log::log!(
-                                "Cannot encode field {}: len {} exceeds max {}",
-                                stringify!(#flexible_field),
-                                field_len,
-                                #max_capacity,
-                            );
-                            return Err(::wheels::DataLayoutError::LengthExceedsCapacity);
-                        }
+    let (datalen_vars, datalen_check, check_logfmt, encoded_len_expr) =
+        match trailing_flexible_field {
+            Some((trailing_flexible_field, comptime_optlen)) => {
+                let max_datalen_value = datalen + comptime_optlen.max_datalen();
+                let max_datalen = usize_lit(max_datalen_value);
+                let logfmt = format!(
+                    "bytes [len={{}}] cannot be deserialized to {} which needs at least {} or at most {} bytes",
+                    struct_name, datalen, max_datalen_value
+                );
+                let encoded_len_expr = match comptime_optlen {
+                    ComptimeOptionalLen::ArrayLen {
+                        len_width,
+                        elem_size,
+                    } => {
+                        let max_capacity = usize_lit(2usize.pow(len_width as u32 * 8) - 1);
+                        let len_width = usize_lit(len_width);
+                        let elem_size = usize_lit(elem_size);
+                        quote! {
+                            let field_len = self.#trailing_flexible_field.len();
+                            if field_len > #max_capacity {
+                                ::pinocchio_log::log!(
+                                    "Cannot encode field {}: len {} exceeds max {}",
+                                    stringify!(#trailing_flexible_field),
+                                    field_len,
+                                    #max_capacity,
+                                );
+                                return Err(::wheels::DataLayoutError::LengthExceedsCapacity);
+                            }
 
-                        Ok(#min_datalen_lit + if field_len == 0 {
-                            0
-                        } else {
-                            #len_width + field_len * #elem_size
-                        })
+                            Ok(#min_datalen_lit + if field_len == 0 {
+                                0
+                            } else {
+                                #len_width + field_len * #elem_size
+                            })
+                        }
                     }
-                }
-                ComptimeOptionalLen::Option { value_size } => {
-                    let value_size = usize_lit(value_size);
+                    ComptimeOptionalLen::Option { value_size } => {
+                        let value_size = usize_lit(value_size);
+                        quote! {
+                            Ok(#min_datalen_lit + self.#trailing_flexible_field.as_ref().map(|_| 1 + #value_size).unwrap_or(0))
+                        }
+                    }
+                };
+                (
                     quote! {
-                        Ok(#min_datalen_lit + self.#flexible_field.as_ref().map(|_| 1 + #value_size).unwrap_or(0))
-                    }
-                }
-            };
-            (
-                quote! {
-                    pub const MIN_DATA_LEN: usize = #total_len_expr;
-                    pub const MAX_DATA_LEN: usize = #max_datalen;
-                },
-                quote!(bytes.len() < Self::MIN_DATA_LEN || bytes.len() > Self::MAX_DATA_LEN),
-                logfmt,
-                encoded_len_expr,
-            )
-        }
-        None => {
-            let logfmt = format!(
-                "bytes [len={{}}] cannot be deserialized to {} which needs exactly {} bytes",
-                struct_name, datalen
-            );
-            (
-                quote!(pub const DATA_LEN: usize = #total_len_expr;),
-                quote!(bytes.len() != Self::DATA_LEN),
-                logfmt,
-                quote!(Ok(#struct_name::DATA_LEN)),
-            )
-        }
-    };
-    let decode_trait_impls = if has_flexible_field {
+                        pub const MIN_DATA_LEN: usize = #total_len_expr;
+                        pub const MAX_DATA_LEN: usize = #max_datalen;
+                    },
+                    quote!(bytes.len() < Self::MIN_DATA_LEN || bytes.len() > Self::MAX_DATA_LEN),
+                    logfmt,
+                    encoded_len_expr,
+                )
+            }
+            None => {
+                let logfmt = format!(
+                    "bytes [len={{}}] cannot be deserialized to {} which needs exactly {} bytes",
+                    struct_name, datalen
+                );
+                (
+                    quote!(pub const DATA_LEN: usize = #total_len_expr;),
+                    quote!(bytes.len() != Self::DATA_LEN),
+                    logfmt,
+                    quote!(Ok(#struct_name::DATA_LEN)),
+                )
+            }
+        };
+    let decode_trait_impls = if has_trailing_flexible_field {
         quote! {
             impl ::wheels::layout::Decodable for #struct_name {
                 type View<'a> = #view_name<'a>;
