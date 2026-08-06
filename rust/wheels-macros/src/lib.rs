@@ -109,15 +109,15 @@ mod variable_offset_layout;
 ///   - `pub const OFFSETS: [usize; N]`
 ///     for field start offsets
 ///
-/// Methods:
-///   - `pub fn decode(&[u8]) -> Result<View<'_>, ProgramError>`
-///   - `pub fn encode(&self) -> Result<[u8; DATA_LEN], ProgramError>`
-///     for constant-size layouts
-///   - `pub fn encode(&self) -> Result<Vec<u8>, ProgramError>`
-///     for trailing-flexible layouts
-///   - `pub fn encode_to(&self, &mut [u8]) -> Result<(), ProgramError>`
-///   - constant-size layouts also implement `Encodable`, `Decodable`, and
+/// Trait APIs:
+///   - all layouts implement `Encodable`
+///   - all layouts implement exact `Decodable`
+///   - constant-size layouts also implement `PrefixDecodable` and
 ///     `FixedSizeLayout`
+///
+/// Import the relevant traits from `wheels::layout` to call `encode`,
+/// `encode_to`, `decode`, or `decode_prefix`. These APIs return
+/// `DataLayoutError`.
 #[proc_macro_attribute]
 pub fn fixed_offset_layout(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr_string = attr.to_string();

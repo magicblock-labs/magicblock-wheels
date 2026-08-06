@@ -1,7 +1,11 @@
 extern crate alloc;
 
-use pinocchio::{error::ProgramError, Address};
-use wheels::{fixed_offset_layout, Pubkey};
+use pinocchio::Address;
+use wheels::{
+    fixed_offset_layout,
+    layout::{Decodable, Encodable, PrefixDecodable},
+    DataLayoutError, Pubkey,
+};
 
 #[repr(align(8))]
 struct Aligned<const N: usize>([u8; N]);
@@ -48,7 +52,20 @@ fn fixed_offset_layout_reserves_constant_space() {
     assert_eq!(view.encrypted_destination_capacity(), 72);
     assert_eq!(view.checksum(), 0xBEEF);
 
-    assert_eq!(value.encode(), Ok(aligned.0));
+    assert_eq!(value.encode().unwrap(), aligned.0.to_vec());
+
+    let mut framed = [0; PrivateTransferFixedArgs::DATA_LEN + 3];
+    let remaining_len = value.encode_to(&mut framed).unwrap().len();
+    assert_eq!(remaining_len, 3);
+    assert_eq!(
+        &framed[..PrivateTransferFixedArgs::DATA_LEN],
+        aligned.0.as_slice()
+    );
+
+    framed[PrivateTransferFixedArgs::DATA_LEN..].copy_from_slice(&[9, 8, 7]);
+    let (view, remaining) = PrivateTransferFixedArgs::decode_prefix(&framed).unwrap();
+    assert_eq!(view.shuttle_id(), 100);
+    assert_eq!(remaining, &[9, 8, 7]);
 }
 
 #[test]
@@ -58,7 +75,7 @@ fn fixed_offset_layout_rejects_invalid_vec_len() {
 
     assert_eq!(
         PrivateTransferFixedArgs::decode(&aligned.0).unwrap_err(),
-        ProgramError::InvalidInstructionData
+        DataLayoutError::LengthExceedsCapacity
     );
 }
 
@@ -99,6 +116,37 @@ fn fixed_offset_layout_supports_trailing_flexible_vec() {
     assert_eq!(view.reserved(), &[1, 2]);
     assert_eq!(view.reserved_capacity(), 4);
     assert_eq!(view.tail(), &[9, 8, 7]);
+
+    let empty_tail = FixedTrailingVecArgs {
+        header: 7,
+        reserved: vec![1, 2],
+        tail: vec![],
+    };
+    let empty_encoded = empty_tail.encode().unwrap();
+    assert_eq!(
+        empty_encoded,
+        [7_u16.to_le_bytes().as_slice(), &[2, 1, 2, 0, 0],].concat()
+    );
+
+    let view = FixedTrailingVecArgs::decode(&empty_encoded).unwrap();
+    assert_eq!(view.tail(), &[]);
+}
+
+#[test]
+fn fixed_offset_layout_rejects_invalid_trailing_flexible_vec_encoding() {
+    let base = [7_u16.to_le_bytes().as_slice(), &[0, 0, 0, 0, 0]].concat();
+
+    let zero_len_header = [base.as_slice(), 0_u16.to_le_bytes().as_slice()].concat();
+    assert_eq!(
+        FixedTrailingVecArgs::decode(&zero_len_header).unwrap_err(),
+        DataLayoutError::InvalidDataLength
+    );
+
+    let truncated_payload = [base.as_slice(), 3_u16.to_le_bytes().as_slice(), &[9]].concat();
+    assert_eq!(
+        FixedTrailingVecArgs::decode(&truncated_payload).unwrap_err(),
+        DataLayoutError::TruncatedVectorPayload
+    );
 }
 
 #[fixed_offset_layout]
@@ -120,10 +168,13 @@ fn fixed_offset_layout_supports_pubkey_and_trailing_flexible_option() {
         authority: Pubkey::from([3; 32]),
         delegate: None,
     };
+    let none_encoded = none_value.encode().unwrap();
     assert_eq!(
-        none_value.encode().unwrap(),
+        none_encoded,
         [9_u16.to_le_bytes().as_slice(), &[3; 32]].concat()
     );
+    let view = FixedTrailingOptionArgs::decode(&none_encoded).unwrap();
+    assert_eq!(view.delegate(), None);
 
     let some_value = FixedTrailingOptionArgs {
         header: 9,
@@ -140,6 +191,23 @@ fn fixed_offset_layout_supports_pubkey_and_trailing_flexible_option() {
     assert_eq!(view.header(), 9);
     assert_eq!(view.authority(), &Pubkey::from([3; 32]));
     assert_eq!(view.delegate(), Some(&Pubkey::from([4; 32])));
+}
+
+#[test]
+fn fixed_offset_layout_rejects_invalid_trailing_flexible_option_encoding() {
+    let base = [9_u16.to_le_bytes().as_slice(), &[3; 32]].concat();
+
+    let tagged_none = [base.as_slice(), &[0], &[4; 32]].concat();
+    assert_eq!(
+        FixedTrailingOptionArgs::decode(&tagged_none).unwrap_err(),
+        DataLayoutError::InvalidOptionTag
+    );
+
+    let truncated_some = [base.as_slice(), &[1], &[4; 8]].concat();
+    assert_eq!(
+        FixedTrailingOptionArgs::decode(&truncated_some).unwrap_err(),
+        DataLayoutError::TruncatedPayload
+    );
 }
 
 #[fixed_offset_layout]
