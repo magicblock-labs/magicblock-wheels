@@ -183,7 +183,7 @@ fn variable_layout_supports_address_vec() {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[fixed_offset_layout]
+#[fixed_offset_layout(buffer_offset = unaligned)]
 struct FixedVerifierEntry {
     verifier_identity: Pubkey,
     verifier_bond: Pubkey,
