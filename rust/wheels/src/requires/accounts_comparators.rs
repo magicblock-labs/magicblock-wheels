@@ -41,8 +41,8 @@ macro_rules! require_signer {
 ///
 /// Require exactly n accounts
 ///
-/// $accounts : &[AccountView]
-/// $n        : usize (literal or comptime const)
+/// `$accounts: &[AccountView]`
+/// `$n: usize` (literal or comptime const)
 ///
 #[macro_export]
 macro_rules! require_n_accounts {
@@ -73,8 +73,8 @@ macro_rules! require_n_accounts {
 ///
 /// Require n-or-more accounts, more is returned as slice.
 ///
-/// $accounts : &[AccountView]
-/// $n        : usize (literal or comptime const)
+/// `$accounts: &[AccountView]`
+/// `$n: usize` (literal or comptime const)
 ///
 #[macro_export]
 macro_rules! require_n_accounts_with_optionals {
@@ -104,8 +104,8 @@ macro_rules! require_n_accounts_with_optionals {
 ///
 /// require n-or-more accounts, more is ignored.
 ///
-/// $accounts : &[AccountView]
-/// $n        : usize (literal or comptime const)
+/// `$accounts: &[AccountView]`
+/// `$n: usize` (literal or comptime const)
 ///
 #[macro_export]
 macro_rules! require_n_accounts_with_ignored {
