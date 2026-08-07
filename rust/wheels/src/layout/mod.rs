@@ -35,8 +35,8 @@
 //!   be accessed, validated, and updated directly from their schema offsets
 //!   while any flexible payload is kept at the end. This applies specifically
 //!   to [`fixed_offset_layout!`](crate::fixed_offset_layout);
-//! - explicit low-level choices for capacity, length-header width, alignment,
-//!   and fixed-size versus variable-size nested elements;
+//! - explicit low-level choices for buffer offset, capacity, length-header
+//!   width, alignment, and fixed-size versus variable-size nested elements;
 //! - compact encodings for on-chain payloads where every byte and compute unit
 //!   matters.
 //!
@@ -92,7 +92,7 @@
 //! | Flexible `Vec<T>` | Allowed only as the final field with `#[flexible = 1]` or `#[flexible = 2]`. No reserved capacity is encoded for that final field. | Every Vec uses `#[flexible = N]`; Vec fields can appear before later fields. `N` can be `1..=8`. |
 //! | `Vec<T>` of user-defined layout types | Requires `T: FixedSizeLayout`; uses `#[capacity = N]` or final `#[flexible = 1]`/`#[flexible = 2]`. Generated getters return [`FixedLayoutSlice`]. | Requires `#[element_size = fixed]` or `#[element_size = variable]`. Fixed elements return [`FixedLayoutSlice`]; variable elements return [`VariableLayoutSlice`]. |
 //! | Prefix decoding | Constant-size layouts implement [`PrefixDecodable`]. Trailing-flexible layouts need exact framing and implement [`Decodable`]. | Normal layouts implement [`PrefixDecodable`]. Layouts using `option = implicit` need exact framing and implement [`Decodable`]. |
-//! | Alignment | Field offsets are stable, so the macro can report padding needed for borrowed views. | Use `buffer_offset = 0..=7` when the input starts at a known offset from an 8-byte aligned base; use `buffer_offset = unaligned` only when generated views do not borrow alignment-sensitive fields. |
+//! | Alignment | Use `buffer_offset = 0..=7` when the input starts at a known offset from an 8-byte aligned base. Use `buffer_offset = unaligned` only when generated views do not borrow alignment-sensitive fields. | Use `buffer_offset = 0..=7` when the input starts at a known offset from an 8-byte aligned base; use `buffer_offset = unaligned` only when generated views do not borrow alignment-sensitive fields. |
 //!
 //! # Practical Guidelines
 //!

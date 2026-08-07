@@ -13,7 +13,7 @@ mod variable_offset_layout;
 ///
 /// use wheels::Pubkey;
 ///
-/// #[fixed_offset_layout]
+/// #[fixed_offset_layout(buffer_offset = 0)]
 /// struct FixedTransferArgs {
 ///     shuttle_id: u32,
 ///     validator: Option<Pubkey>,
@@ -22,7 +22,7 @@ mod variable_offset_layout;
 ///     checksum: u16,
 /// }
 ///
-/// #[fixed_offset_layout]
+/// #[fixed_offset_layout(buffer_offset = 0)]
 /// struct TransferWithTrailingPayloadArgs {
 ///     shuttle_id: u32,
 ///     #[capacity = 4]
@@ -63,7 +63,35 @@ mod variable_offset_layout;
 /// ==========
 ///
 /// Struct attributes:
-///   - none. `#[fixed_offset_layout]` does not take parameters.
+///   - `#[fixed_offset_layout(buffer_offset = 0..=7)]`
+///   - `#[fixed_offset_layout(buffer_offset = unaligned)]`
+///
+///     - `buffer_offset`
+///
+///       Mandatory.
+///
+///       Use `buffer_offset = N` when the input slice always starts at a known
+///       offset from an 8-byte aligned base address:
+///
+///       `(bytes.as_ptr() as usize) % 8`
+///
+///       Example:
+///
+///       - if the original account or instruction buffer is 8-byte aligned and
+///         the payload slice passed to `decode()` is `&input[1..]`, then
+///         `buffer_offset = 1`.
+///
+///       Fixed offsets are used both at runtime and at compile-time:
+///
+///       - the generated decoder validates that the actual slice pointer matches
+///         this offset
+///       - borrowed getters are only generated when their alignment can be
+///         guaranteed for every valid encoding under this `buffer_offset`
+///
+///       Use `buffer_offset = unaligned` when the slice may start at any
+///       address. This mode emits no pointer-offset check and rejects borrowed
+///       views whose required alignment is greater than 1. Copy-decoded fields
+///       such as integer primitives remain supported.
 ///
 /// Field attributes:
 ///   - `#[capacity = N]`

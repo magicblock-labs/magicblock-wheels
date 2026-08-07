@@ -4,7 +4,10 @@ use crate::common::{
 };
 use proc_macro2::Span;
 use quote::{format_ident, quote};
-use syn::{spanned::Spanned, Expr, ExprLit, Fields, Ident, ItemStruct, Lit, LitInt, Type};
+use syn::{
+    parse::Parser, punctuated::Punctuated, spanned::Spanned, Expr, ExprLit, Fields, Ident,
+    ItemStruct, Lit, LitInt, Meta, Token, Type,
+};
 
 const FIELD_ATTRIBUTES: &[&str] = &["capacity", "flexible"];
 const LAYOUT_NAME: &str = "fixed_offset_layout";
@@ -21,7 +24,7 @@ pub(crate) fn expand_fixed_offset_layout(
     attr: &str,
     input: &ItemStruct,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    parse_args(attr)?;
+    let args = parse_args(attr)?;
     let mut emitted_input = input.clone();
     emitted_input
         .attrs
@@ -31,6 +34,25 @@ pub(crate) fn expand_fixed_offset_layout(
 
     let struct_name = &emitted_input.ident;
     let view_name = format_ident!("{}View", struct_name);
+    let buffer_offset_validation = match args.buffer_offset {
+        BufferOffset::Fixed(buffer_offset) => {
+            let buffer_offset_lit = usize_lit(buffer_offset);
+            quote! {
+                if (bytes.as_ptr() as usize) % 8 != #buffer_offset_lit {
+                    ::pinocchio_log::log!(
+                        "bytes [ptr_mod_8={}] cannot be deserialized to {} which requires buffer_offset = {} from an 8-byte aligned base",
+                        (bytes.as_ptr() as usize) % 8,
+                        stringify!(#struct_name),
+                        #buffer_offset_lit,
+                    );
+                    return Err(
+                        ::wheels::DataLayoutError::InvalidBufferOffset,
+                    );
+                }
+            }
+        }
+        BufferOffset::Unaligned => quote!(),
+    };
 
     let Fields::Named(fields) = &mut emitted_input.fields else {
         return Err(syn::Error::new_spanned(
@@ -50,8 +72,6 @@ pub(crate) fn expand_fixed_offset_layout(
 
     let mut validate_steps = Vec::new();
     let mut layout_error: Option<syn::Error> = None;
-    let mut required_alignment = 1usize;
-
     let mut trailing_flexible_field = None;
     let field_count = fields.named.len();
     for (index, field) in fields.named.iter_mut().enumerate() {
@@ -63,32 +83,32 @@ pub(crate) fn expand_fixed_offset_layout(
 
         strip_field_attr(&mut field.attrs, FIELD_ATTRIBUTES);
 
-        if let Some(offset) = offset_value {
-            match layout.check_ref_alignment(offset, field_ident) {
-                Ok(Some(issue)) => {
-                    if let Some(existing) = &mut layout_error {
-                        existing.combine(issue.error);
-                    } else {
-                        layout_error = Some(issue.error);
-                    }
-                    offset_value = Some(offset + issue.padding);
-                    let padding = usize_lit(issue.padding);
-                    offset_expr = quote!((#offset_expr + #padding));
+        match layout.check_ref_alignment(offset_value, args.buffer_offset, field_ident) {
+            Ok(Some(issue)) => {
+                if let Some(existing) = &mut layout_error {
+                    existing.combine(issue.error);
+                } else {
+                    layout_error = Some(issue.error);
                 }
-                Ok(None) => {}
-                Err(err) => {
-                    if let Some(existing) = &mut layout_error {
-                        existing.combine(err);
-                    } else {
-                        layout_error = Some(err);
-                    }
+                offset_value = offset_value.map(|offset| offset + issue.padding);
+                let padding = usize_lit(issue.padding);
+                offset_expr = quote!((#offset_expr + #padding));
+            }
+            Ok(None) => {}
+            Err(err) => {
+                if let Some(existing) = &mut layout_error {
+                    existing.combine(err);
+                } else {
+                    layout_error = Some(err);
                 }
             }
         }
 
-        required_alignment = required_alignment.max(layout.borrowed_alignment());
-
-        validate_steps.push(layout.gen_validate_step(offset_expr.clone(), field_ident));
+        validate_steps.push(layout.gen_validate_step(
+            offset_expr.clone(),
+            args.buffer_offset,
+            field_ident,
+        ));
         view_methods.push(layout.gen_view_methods(offset_expr.clone(), field_ident)?);
 
         fields_encode_expr =
@@ -140,7 +160,6 @@ pub(crate) fn expand_fixed_offset_layout(
             "Sum of encodable-sizes is computed from nested fixed-size layouts.".to_string()
         });
     let has_trailing_flexible_field = trailing_flexible_field.is_some();
-    let required_alignment_lit = usize_lit(required_alignment);
 
     let (datalen_vars, datalen_check, check_log_expr, encoded_len_expr) =
         match trailing_flexible_field {
@@ -281,17 +300,8 @@ pub(crate) fn expand_fixed_offset_layout(
                 if #datalen_check {
                     #check_log_expr
                     return Err(::wheels::DataLayoutError::InvalidDataLength);
-                } else if #required_alignment_lit > 1
-                    && bytes.as_ptr().align_offset(#required_alignment_lit) != 0
-                {
-                    ::pinocchio_log::log!(
-                        "bytes [align_offset={}] cannot be deserialized to {} which requires {}-byte alignment",
-                        bytes.as_ptr().align_offset(#required_alignment_lit),
-                        stringify!(#struct_name),
-                        #required_alignment_lit,
-                    );
-                    return Err(::wheels::DataLayoutError::InvalidFieldAlignment);
                 }
+                #buffer_offset_validation
 
                 #(#validate_steps)*
 
@@ -544,13 +554,6 @@ impl FixedVecElementKind {
         }
     }
 
-    fn borrowed_alignment(&self) -> usize {
-        match self {
-            Self::FixedValue(value) => value.align(),
-            Self::FixedSizeLayout { .. } => 1,
-        }
-    }
-
     fn needs_pod_bound(&self) -> bool {
         match self {
             Self::FixedValue(value) => value.needs_pod_bound(),
@@ -602,16 +605,6 @@ struct PaddingIssue {
 }
 
 impl FixedFieldKind {
-    fn borrowed_alignment(&self) -> usize {
-        match self {
-            Self::Value { value, .. } => match value.access_mode() {
-                AccessMode::Copy => 1,
-                AccessMode::Ref => value.align(),
-            },
-            Self::Vec { elem, .. } => elem.borrowed_alignment(),
-        }
-    }
-
     fn slot_min_len_expr(&self) -> Result<SlotLen, ComptimeOptionalLen> {
         match self {
             Self::Value { value, optional } => {
@@ -677,7 +670,8 @@ impl FixedFieldKind {
 
     fn check_ref_alignment(
         &self,
-        offset: usize,
+        offset: Option<usize>,
+        buffer_offset: BufferOffset,
         field_ident: &Ident,
     ) -> syn::Result<Option<PaddingIssue>> {
         match self {
@@ -687,20 +681,34 @@ impl FixedFieldKind {
                 }
 
                 let align = value.align();
+                if align <= 1 {
+                    return Ok(None);
+                }
+                if matches!(buffer_offset, BufferOffset::Unaligned) {
+                    return Err(syn::Error::new(
+                        field_ident.span(),
+                        format!(
+                            "field `{}` cannot be borrowed with `buffer_offset = unaligned`: it requires {}-byte alignment, but the input slice may start at any address",
+                            field_ident, align
+                        ),
+                    ));
+                }
                 if align > 8 {
                     return Err(syn::Error::new(
                         field_ident.span(),
                         format!(
-                            "field `{}` cannot be borrowed by fixed_offset_layout: size is {} byte(s) but alignment is {} byte(s), and fixed_offset_layout only assumes the input buffer is 8-byte aligned",
-                            field_ident,
-                            value.size(),
-                            align,
+                            "field `{}` cannot be borrowed with `buffer_offset = {}`: it requires {}-byte alignment, but fixed_offset_layout only assumes the original input buffer is 8-byte aligned",
+                            field_ident, buffer_offset.value().expect("fixed buffer_offset"), align
                         ),
                     ));
                 }
 
+                let Some(offset) = offset else {
+                    return Ok(None);
+                };
+                let buffer_offset = buffer_offset.value().expect("fixed buffer_offset");
                 let payload_offset = offset + usize::from(optional.is_some());
-                let misalignment = payload_offset % align;
+                let misalignment = (buffer_offset + payload_offset) % align;
                 if misalignment == 0 {
                     return Ok(None);
                 }
@@ -740,21 +748,35 @@ impl FixedFieldKind {
                 };
 
                 let align = elem.align();
+                if align <= 1 {
+                    return Ok(None);
+                }
+                if matches!(buffer_offset, BufferOffset::Unaligned) {
+                    return Err(syn::Error::new(
+                        field_ident.span(),
+                        format!(
+                            "field `{}` cannot expose a slice view with `buffer_offset = unaligned`: its elements require {}-byte alignment, but the input slice may start at any address",
+                            field_ident, align
+                        ),
+                    ));
+                }
                 if align > 8 {
                     return Err(syn::Error::new(
                         field_ident.span(),
                         format!(
-                            "field `{}` cannot expose a slice view in fixed_offset_layout: each Vec element is {} byte(s) but alignment is {} byte(s), and fixed_offset_layout only assumes the input buffer is 8-byte aligned, so it cannot support type which requires alignment greater than 8",
-                            field_ident,
-                            elem.size(),
-                            align,
+                            "field `{}` cannot expose a slice view with `buffer_offset = {}`: its elements require {}-byte alignment, but fixed_offset_layout only assumes the original input buffer is 8-byte aligned",
+                            field_ident, buffer_offset.value().expect("fixed buffer_offset"), align
                         ),
                     ));
                 }
 
+                let Some(offset) = offset else {
+                    return Ok(None);
+                };
+                let buffer_offset = buffer_offset.value().expect("fixed buffer_offset");
                 let len_width = capacity.len_width();
                 let first_elem_offset = offset + len_width;
-                let misalignment = first_elem_offset % align;
+                let misalignment = (buffer_offset + first_elem_offset) % align;
                 if misalignment == 0 {
                     return Ok(None);
                 }
@@ -784,6 +806,7 @@ impl FixedFieldKind {
     fn gen_validate_step(
         &self,
         offset: proc_macro2::TokenStream,
+        buffer_offset: BufferOffset,
         field_ident: &Ident,
     ) -> proc_macro2::TokenStream {
         let field_name = field_ident.to_string();
@@ -793,8 +816,12 @@ impl FixedFieldKind {
                 value,
                 optional: Some(Optional::Fixed),
             } => {
-                let alignment_check =
-                    value_alignment_check(value, quote!(#offset_expr + 1usize), &field_name);
+                let alignment_check = value_alignment_check(
+                    value,
+                    quote!(#offset_expr + 1usize),
+                    buffer_offset,
+                    &field_name,
+                );
                 quote! {
                     Self::__validate_option(bytes, #offset_expr, #field_name)?;
                     if bytes[#offset_expr] != 0 {
@@ -807,8 +834,12 @@ impl FixedFieldKind {
                 optional: Some(Optional::Flexible),
             } => {
                 let value_size = usize_lit(value.size());
-                let alignment_check =
-                    value_alignment_check(value, quote!(#offset_expr + 1usize), &field_name);
+                let alignment_check = value_alignment_check(
+                    value,
+                    quote!(#offset_expr + 1usize),
+                    buffer_offset,
+                    &field_name,
+                );
                 quote! {
                     Self::__validate_flexible_option(bytes, #offset_expr, #value_size, #field_name)?;
                     if bytes.len() != #offset_expr {
@@ -832,17 +863,22 @@ impl FixedFieldKind {
                 };
                 let alignment_check = match elem {
                     FixedVecElementKind::FixedValue(value) if value.align() > 1 => {
-                        let align = usize_lit(value.align());
-                        quote! {
-                            if #len_expr != 0 && #data_offset % #align != 0 {
-                                ::pinocchio_log::log!(
-                                    "Invalid alignment for field {} : element data starts at offset {}, expected {}-byte alignment",
-                                    #field_name,
-                                    #data_offset,
-                                    #align,
-                                );
-                                return Err(::wheels::DataLayoutError::InvalidFieldAlignment);
+                        if let BufferOffset::Fixed(buffer_offset) = buffer_offset {
+                            let align = usize_lit(value.align());
+                            let buffer_offset = usize_lit(buffer_offset);
+                            quote! {
+                                if #len_expr != 0 && (#buffer_offset + #data_offset) % #align != 0 {
+                                    ::pinocchio_log::log!(
+                                        "Invalid alignment for field {} : element data starts at offset {}, expected {}-byte alignment",
+                                        #field_name,
+                                        #data_offset,
+                                        #align,
+                                    );
+                                    return Err(::wheels::DataLayoutError::InvalidFieldAlignment);
+                                }
                             }
+                        } else {
+                            quote!()
                         }
                     }
                     _ => quote!(),
@@ -871,7 +907,7 @@ impl FixedFieldKind {
             Self::Value {
                 value,
                 optional: None,
-            } => value_alignment_check(value, offset_expr, &field_name),
+            } => value_alignment_check(value, offset_expr, buffer_offset, &field_name),
         }
     }
 
@@ -1267,14 +1303,95 @@ fn parse_field_layout(field: &syn::Field, is_last_field: bool) -> syn::Result<Fi
     })
 }
 
-fn parse_args(attr: &str) -> syn::Result<()> {
-    match attr.trim() {
-        "" => Ok(()),
-        _ => Err(syn::Error::new(
-            Span::call_site(),
-            "fixed_offset_layout does not support parameters",
-        )),
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LayoutArgs {
+    buffer_offset: BufferOffset,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BufferOffset {
+    Fixed(usize),
+    Unaligned,
+}
+
+impl BufferOffset {
+    fn value(self) -> Option<usize> {
+        match self {
+            Self::Fixed(value) => Some(value),
+            Self::Unaligned => None,
+        }
     }
+}
+
+fn parse_args(attr: &str) -> syn::Result<LayoutArgs> {
+    if attr.trim().is_empty() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "fixed_offset_layout requires `buffer_offset = 0..=7` or `buffer_offset = unaligned`",
+        ));
+    }
+
+    let metas = Punctuated::<Meta, Token![,]>::parse_terminated.parse_str(attr)?;
+    let mut buffer_offset = None;
+
+    for meta in metas {
+        match meta {
+            Meta::NameValue(meta) if meta.path.is_ident("buffer_offset") => match meta.value {
+                Expr::Lit(ExprLit {
+                    lit: Lit::Int(lit_int),
+                    ..
+                }) => {
+                    let value: usize = lit_int.base10_parse()?;
+                    if value <= 7 {
+                        buffer_offset = Some(BufferOffset::Fixed(value));
+                    } else {
+                        return Err(syn::Error::new_spanned(
+                            lit_int,
+                            "buffer_offset must be in the range 0..=7",
+                        ));
+                    }
+                }
+                Expr::Path(value) => {
+                    let Some(ident) = value.path.get_ident() else {
+                        return Err(syn::Error::new_spanned(
+                            value,
+                            "buffer_offset must be an integer in 0..=7 or `unaligned`",
+                        ));
+                    };
+
+                    if ident == "unaligned" {
+                        buffer_offset = Some(BufferOffset::Unaligned);
+                    } else {
+                        return Err(syn::Error::new_spanned(
+                            ident,
+                            "buffer_offset must be an integer in 0..=7 or `unaligned`",
+                        ));
+                    }
+                }
+                other => {
+                    return Err(syn::Error::new_spanned(
+                        other,
+                        "buffer_offset must be an integer in 0..=7 or `unaligned`",
+                    ));
+                }
+            },
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    meta,
+                    "fixed_offset_layout only supports `buffer_offset = 0..=7` and `buffer_offset = unaligned`",
+                ))
+            }
+        }
+    }
+
+    let Some(buffer_offset) = buffer_offset else {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "fixed_offset_layout requires `buffer_offset = 0..=7` or `buffer_offset = unaligned`",
+        ));
+    };
+
+    Ok(LayoutArgs { buffer_offset })
 }
 
 #[derive(Copy, Clone)]
@@ -1451,15 +1568,20 @@ fn accessor_ident(field_ident: &Ident) -> Ident {
 fn value_alignment_check(
     value: &FixedValueKind,
     offset: proc_macro2::TokenStream,
+    buffer_offset: BufferOffset,
     field_name: &str,
 ) -> proc_macro2::TokenStream {
     if !matches!(value.access_mode(), AccessMode::Ref) || value.align() <= 1 {
         return quote!();
     }
+    let BufferOffset::Fixed(buffer_offset) = buffer_offset else {
+        return quote!();
+    };
 
     let align = usize_lit(value.align());
+    let buffer_offset = usize_lit(buffer_offset);
     quote! {
-        if (#offset) % #align != 0 {
+        if (#buffer_offset + #offset) % #align != 0 {
             ::pinocchio_log::log!(
                 "Invalid alignment for field {} : payload starts at offset {}, expected {}-byte alignment",
                 #field_name,
@@ -1524,11 +1646,51 @@ mod tests {
             }
         };
 
-        let error = expand_fixed_offset_layout("", &item)
+        let error = expand_fixed_offset_layout("buffer_offset = 0", &item)
             .unwrap_err()
             .to_string();
         assert!(error.contains("field `payload` needs 7 byte(s) of padding before it"));
         assert!(error.contains("starts at offset 8"));
+    }
+
+    #[test]
+    fn fixed_offset_layout_uses_buffer_offset_for_padding() {
+        let item: syn::ItemStruct = parse_quote! {
+            struct Args {
+                flag: u8,
+                payload: [u64; 2],
+            }
+        };
+
+        expand_fixed_offset_layout("buffer_offset = 7", &item).unwrap();
+    }
+
+    #[test]
+    fn fixed_offset_layout_rejects_unaligned_borrowed_field() {
+        let item: syn::ItemStruct = parse_quote! {
+            struct Args {
+                payload: [u64; 2],
+            }
+        };
+
+        let error = expand_fixed_offset_layout("buffer_offset = unaligned", &item)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("field `payload` cannot be borrowed with `buffer_offset = unaligned`")
+        );
+    }
+
+    #[test]
+    fn fixed_offset_layout_accepts_unaligned_copy_only_fields() {
+        let item: syn::ItemStruct = parse_quote! {
+            struct Args {
+                amount: u64,
+                counter: u32,
+            }
+        };
+
+        expand_fixed_offset_layout("buffer_offset = unaligned", &item).unwrap();
     }
 
     #[test]
@@ -1540,7 +1702,7 @@ mod tests {
             }
         };
 
-        let error = expand_fixed_offset_layout("", &item)
+        let error = expand_fixed_offset_layout("buffer_offset = 0", &item)
             .unwrap_err()
             .to_string();
         assert!(error.contains("field `payload` needs 6 byte(s) of padding before it"));
@@ -1559,7 +1721,7 @@ mod tests {
             }
         };
 
-        let error = expand_fixed_offset_layout("", &item)
+        let error = expand_fixed_offset_layout("buffer_offset = 0", &item)
             .unwrap_err()
             .to_string();
         assert!(error.contains("field `values` needs 7 byte(s) of padding before it"));
@@ -1579,7 +1741,7 @@ mod tests {
             }
         };
 
-        let error = expand_fixed_offset_layout("", &item)
+        let error = expand_fixed_offset_layout("buffer_offset = 0", &item)
             .unwrap_err()
             .to_string();
         assert!(error.contains("field `payload` needs 7 byte(s) of padding before it"));
@@ -1594,11 +1756,11 @@ mod tests {
             }
         };
 
-        let error = expand_fixed_offset_layout("", &item)
+        let error = expand_fixed_offset_layout("buffer_offset = 0", &item)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("field `big` cannot be borrowed by fixed_offset_layout"));
-        assert!(error.contains("alignment is 16 byte(s)"));
+        assert!(error.contains("field `big` cannot be borrowed with `buffer_offset = 0`"));
+        assert!(error.contains("requires 16-byte alignment"));
         assert!(error.contains("8-byte aligned"));
     }
 
@@ -1610,7 +1772,7 @@ mod tests {
             }
         };
 
-        let error = expand_fixed_offset_layout("", &item)
+        let error = expand_fixed_offset_layout("buffer_offset = 0", &item)
             .unwrap_err()
             .to_string();
         assert!(error.contains("Vec fields in fixed_offset_layout require `#[capacity = N]`"));
@@ -1625,7 +1787,7 @@ mod tests {
             }
         };
 
-        let error = expand_fixed_offset_layout("", &item)
+        let error = expand_fixed_offset_layout("buffer_offset = 0", &item)
             .unwrap_err()
             .to_string();
         assert!(error.contains("String is not supported by fixed_offset_layout"));
@@ -1640,7 +1802,7 @@ mod tests {
             }
         };
 
-        let error = expand_fixed_offset_layout("", &item)
+        let error = expand_fixed_offset_layout("buffer_offset = 0", &item)
             .unwrap_err()
             .to_string();
         assert!(error.contains("Vec<Vec<T>> is not supported by fixed_offset_layout"));
@@ -1655,7 +1817,7 @@ mod tests {
             }
         };
 
-        let error = expand_fixed_offset_layout("", &item)
+        let error = expand_fixed_offset_layout("buffer_offset = 0", &item)
             .unwrap_err()
             .to_string();
         assert!(
@@ -1666,16 +1828,48 @@ mod tests {
     }
 
     #[test]
-    fn fixed_offset_layout_rejects_parameters() {
+    fn fixed_offset_layout_requires_buffer_offset() {
         let item: syn::ItemStruct = parse_quote! {
             struct Args {
                 value: u16,
             }
         };
 
-        let error = expand_fixed_offset_layout("mut", &item)
+        let error = expand_fixed_offset_layout("", &item)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("fixed_offset_layout does not support parameters"));
+        assert!(error.contains(
+            "fixed_offset_layout requires `buffer_offset = 0..=7` or `buffer_offset = unaligned`"
+        ));
+    }
+
+    #[test]
+    fn fixed_offset_layout_rejects_invalid_buffer_offset() {
+        let item: syn::ItemStruct = parse_quote! {
+            struct Args {
+                value: u16,
+            }
+        };
+
+        let error = expand_fixed_offset_layout("buffer_offset = 8", &item)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("buffer_offset must be in the range 0..=7"));
+    }
+
+    #[test]
+    fn fixed_offset_layout_rejects_unknown_parameters() {
+        let item: syn::ItemStruct = parse_quote! {
+            struct Args {
+                value: u16,
+            }
+        };
+
+        let error = expand_fixed_offset_layout("option = implicit", &item)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(
+            "fixed_offset_layout only supports `buffer_offset = 0..=7` and `buffer_offset = unaligned`"
+        ));
     }
 }
