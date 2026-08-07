@@ -8,8 +8,8 @@
 //! ```
 //!
 //! Layout structs are still written with ordinary Rust field types such as
-//! `Vec<T>` and `Option<T>`. Helper view types like [`LayoutSlice`] and
-//! [`LayoutList`] appear only in generated view getters.
+//! `Vec<T>` and `Option<T>`. Helper view types like [`FixedLayoutSlice`] and
+//! [`VariableLayoutSlice`] appear only in generated view getters.
 //!
 //! # Why Layouts Exist
 //!
@@ -86,7 +86,7 @@
 //! | Implicit `Option<T>` | Not supported. | ⚠️ Backward compatibility only; avoid for new types. The struct-level `option = implicit` mode omits option tags and saves one byte per `Option<T>`, but is allowed only when there are no Vec fields and option presence can be inferred unambiguously from total encoded length. |
 //! | `Vec<T>` of supported scalar/key types | Uses `#[capacity = N]` to reserve space for `N` elements. Views expose active `len` and a `<field>_capacity()` method. | Uses `#[flexible = N]` to encode only active elements. Views return borrowed slices like `&[T]`. |
 //! | Flexible `Vec<T>` | Allowed only as the final field with `#[flexible = 1]` or `#[flexible = 2]`. No reserved capacity is encoded for that final field. | Every Vec uses `#[flexible = N]`; Vec fields can appear before later fields. `N` can be `1..=8`. |
-//! | `Vec<T>` of user-defined layout types | Not supported. | Requires `#[element_size = fixed]` or `#[element_size = variable]`. Fixed elements return [`LayoutSlice`]; variable elements return [`LayoutList`]. |
+//! | `Vec<T>` of user-defined layout types | Not supported. | Requires `#[element_size = fixed]` or `#[element_size = variable]`. Fixed elements return [`FixedLayoutSlice`]; variable elements return [`VariableLayoutSlice`]. |
 //! | Prefix decoding | Constant-size layouts implement [`PrefixDecodable`]. Trailing-flexible layouts need exact framing and implement [`Decodable`]. | Normal layouts implement [`PrefixDecodable`]. Layouts using `option = implicit` need exact framing and implement [`Decodable`]. |
 //! | Alignment | Field offsets are stable, so the macro can report padding needed for borrowed views. | Use `buffer_offset = 0..=7` when the input starts at a known offset from an 8-byte aligned base; use `buffer_offset = unaligned` only when generated views do not borrow alignment-sensitive fields. |
 //!
@@ -116,9 +116,9 @@
 //! ```
 //!
 //! `fixed` means each element has a constant encoded width and the generated
-//! getter returns [`LayoutSlice`]. `variable` means each element is
+//! getter returns [`FixedLayoutSlice`]. `variable` means each element is
 //! self-delimiting through [`PrefixDecodable`] and the generated getter returns
-//! [`LayoutList`].
+//! [`VariableLayoutSlice`].
 //!
 //! Avoid `option = implicit` for new types. It exists for backward compatibility
 //! with older compact encodings. Because it omits option tags, decoding depends
@@ -127,11 +127,11 @@
 //!
 use crate::DataLayoutError;
 
-mod list;
-mod slice;
+mod fixed_slice;
+mod variable_slice;
 
-pub use list::{LayoutList, LayoutListIter};
-pub use slice::{LayoutSlice, LayoutSliceIter};
+pub use fixed_slice::{FixedLayoutSlice, FixedLayoutSliceIter};
+pub use variable_slice::{VariableLayoutSlice, VariableLayoutSliceIter};
 
 pub trait DataLayoutKind {
     const IS_FIXED: bool;

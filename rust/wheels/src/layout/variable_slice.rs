@@ -2,17 +2,16 @@ use super::PrefixDecodable;
 use crate::DataLayoutError;
 
 ///
-/// Borrowed view over a `Vec<T>` field whose elements are prefix-decodable
+/// Borrowed view over a `Vec<T>` field whose elements are variable-size
 /// layouts.
 ///
 /// Users do not write this type in their layout structs. They continue to write
-/// `Vec<T>`, and generated view getters return `LayoutList<'a, T>` for
+/// `Vec<T>`, and generated view getters return `VariableLayoutSlice<'a, T>` for
 /// user-defined layout element types marked with `#[element_size = variable]`.
 ///
-/// Unlike `LayoutSlice`, this type does not require elements to have a fixed
-/// encoded width. It validates and walks elements sequentially with
-/// `T::decode_prefix`, using the encoded Vec length header supplied by the
-/// parent layout.
+/// Unlike `FixedLayoutSlice`, this type does not require elements to have a
+/// fixed encoded width. It validates and walks elements sequentially, using the
+/// encoded Vec length header supplied by the parent layout.
 ///
 /// # Tradeoffs
 ///
@@ -24,7 +23,7 @@ use crate::DataLayoutError;
 ///   `PrefixDecodable` so their boundaries are self-delimiting.
 ///
 #[derive(Clone, Copy, Debug)]
-pub struct LayoutList<'a, T>
+pub struct VariableLayoutSlice<'a, T>
 where
     T: PrefixDecodable,
 {
@@ -33,7 +32,7 @@ where
     _marker: core::marker::PhantomData<T>,
 }
 
-impl<'a, T> LayoutList<'a, T>
+impl<'a, T> VariableLayoutSlice<'a, T>
 where
     T: PrefixDecodable,
 {
@@ -86,8 +85,8 @@ where
         self.iter().nth(index)
     }
 
-    pub fn iter(&self) -> LayoutListIter<'a, T> {
-        LayoutListIter {
+    pub fn iter(&self) -> VariableLayoutSliceIter<'a, T> {
+        VariableLayoutSliceIter {
             bytes: self.bytes,
             remaining_len: self.len,
             _marker: core::marker::PhantomData,
@@ -95,7 +94,7 @@ where
     }
 }
 
-pub struct LayoutListIter<'a, T>
+pub struct VariableLayoutSliceIter<'a, T>
 where
     T: PrefixDecodable,
 {
@@ -104,7 +103,7 @@ where
     _marker: core::marker::PhantomData<T>,
 }
 
-impl<'a, T> Iterator for LayoutListIter<'a, T>
+impl<'a, T> Iterator for VariableLayoutSliceIter<'a, T>
 where
     T: PrefixDecodable,
 {
