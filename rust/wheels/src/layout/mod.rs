@@ -63,8 +63,12 @@
 //! - `Vec<bool>`
 //! - `Option<Vec<T>>`
 //!
-//! [`variable_offset_layout!`](crate::variable_offset_layout) also supports
-//! `Vec<T>` where `T` is a user-defined layout type. Those fields must choose
+//! [`fixed_offset_layout!`](crate::fixed_offset_layout) also supports `Vec<T>`
+//! where `T` is a user-defined fixed-size layout type. The generated getter
+//! returns [`FixedLayoutSlice`].
+//!
+//! [`variable_offset_layout!`](crate::variable_offset_layout) supports `Vec<T>`
+//! where `T` is a user-defined layout type. Those fields must choose
 //! `#[element_size = fixed]` or `#[element_size = variable]` explicitly.
 //!
 //! # Choosing a Layout Macro
@@ -86,7 +90,7 @@
 //! | Implicit `Option<T>` | Not supported. | ⚠️ Backward compatibility only; avoid for new types. The struct-level `option = implicit` mode omits option tags and saves one byte per `Option<T>`, but is allowed only when there are no Vec fields and option presence can be inferred unambiguously from total encoded length. |
 //! | `Vec<T>` of supported scalar/key types | Uses `#[capacity = N]` to reserve space for `N` elements. Views expose active `len` and a `<field>_capacity()` method. | Uses `#[flexible = N]` to encode only active elements. Views return borrowed slices like `&[T]`. |
 //! | Flexible `Vec<T>` | Allowed only as the final field with `#[flexible = 1]` or `#[flexible = 2]`. No reserved capacity is encoded for that final field. | Every Vec uses `#[flexible = N]`; Vec fields can appear before later fields. `N` can be `1..=8`. |
-//! | `Vec<T>` of user-defined layout types | Not supported. | Requires `#[element_size = fixed]` or `#[element_size = variable]`. Fixed elements return [`FixedLayoutSlice`]; variable elements return [`VariableLayoutSlice`]. |
+//! | `Vec<T>` of user-defined layout types | Requires `T: FixedSizeLayout`; uses `#[capacity = N]` or final `#[flexible = 1]`/`#[flexible = 2]`. Generated getters return [`FixedLayoutSlice`]. | Requires `#[element_size = fixed]` or `#[element_size = variable]`. Fixed elements return [`FixedLayoutSlice`]; variable elements return [`VariableLayoutSlice`]. |
 //! | Prefix decoding | Constant-size layouts implement [`PrefixDecodable`]. Trailing-flexible layouts need exact framing and implement [`Decodable`]. | Normal layouts implement [`PrefixDecodable`]. Layouts using `option = implicit` need exact framing and implement [`Decodable`]. |
 //! | Alignment | Field offsets are stable, so the macro can report padding needed for borrowed views. | Use `buffer_offset = 0..=7` when the input starts at a known offset from an 8-byte aligned base; use `buffer_offset = unaligned` only when generated views do not borrow alignment-sensitive fields. |
 //!
@@ -96,6 +100,8 @@
 //! data is long-lived state and stable offsets are useful. This is the better
 //! fit when a `Vec<T>` should have schema-level capacity, because the layout
 //! reserves storage even when the active length is smaller.
+//! User-defined `Vec<T>` elements in `fixed_offset_layout` must be fixed-size
+//! layouts and do not use `#[element_size = ...]`.
 //!
 //! Use [`variable_offset_layout!`](crate::variable_offset_layout) when compact
 //! encoding matters more than stable offsets. This is usually the better fit

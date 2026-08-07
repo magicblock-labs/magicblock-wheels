@@ -18,15 +18,15 @@ use crate::DataLayoutError;
 ///   `T::View<'a>`.
 /// - Generated views should still expose collection-like access through `len`,
 ///   `is_empty`, `get`, `iter`, and `as_bytes`.
-/// - `FixedLayoutSlice` adapts a `variable_offset_layout` Vec payload into
-///   borrowed `T::View<'a>` values without allocation.
+/// - `FixedLayoutSlice` adapts generated Vec payloads into borrowed
+///   `T::View<'a>` values without allocation.
 /// - Variable-size element layouts use `VariableLayoutSlice` instead.
 ///
 /// A `FixedLayoutSlice` contains only the active Vec payload: exactly
-/// `len * T::DATA_LEN` bytes. There is no reserved capacity beyond the encoded
-/// length. This differs from a Vec field in `fixed_offset_layout`, which has
-/// both a logical `len` and a schema-level `capacity` with reserved trailing
-/// storage.
+/// `len * T::DATA_LEN` bytes. For fixed-capacity Vec fields in
+/// `fixed_offset_layout`, generated getters slice out only the active elements;
+/// reserved trailing storage remains part of the parent layout and is exposed
+/// separately through the generated `<field>_capacity()` method.
 ///
 #[derive(Clone, Copy, Debug)]
 pub struct FixedLayoutSlice<'a, T>

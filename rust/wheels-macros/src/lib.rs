@@ -97,6 +97,9 @@ mod variable_offset_layout;
 ///     supported. Views return borrowed keys.
 ///   - Integer primitives, fixed-size arrays of integer primitives, and Vecs of
 ///     supported fixed-value element types are supported.
+///   - `Vec<T>` for user-defined layout element types is supported when `T`
+///     implements `FixedSizeLayout`. Generated views return
+///     `FixedLayoutSlice<'_, T>`.
 ///
 /// APIs
 /// ====

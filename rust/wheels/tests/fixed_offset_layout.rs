@@ -278,3 +278,151 @@ fn fixed_offset_layout_supports_address_vec() {
     assert_eq!(view.owners_capacity(), 2);
     assert_eq!(view.checksum(), 0xBEEF);
 }
+
+#[fixed_offset_layout]
+#[derive(Clone)]
+struct FixedEntry {
+    id: u16,
+    enabled: Option<bool>,
+}
+
+#[fixed_offset_layout]
+struct FixedEntryVecArgs {
+    tag: u8,
+    #[capacity = 3]
+    entries: Vec<FixedEntry>,
+    checksum: u16,
+}
+
+#[test]
+fn fixed_offset_layout_supports_fixed_layout_vec() {
+    assert_eq!(FixedEntry::DATA_LEN, 4);
+    assert_eq!(FixedEntryVecArgs::DATA_LEN, 16);
+    assert_eq!(FixedEntryVecArgs::OFFSETS, [0, 1, 14]);
+
+    let value = FixedEntryVecArgs {
+        tag: 9,
+        entries: vec![
+            FixedEntry {
+                id: 0x0102,
+                enabled: Some(true),
+            },
+            FixedEntry {
+                id: 0x0304,
+                enabled: None,
+            },
+        ],
+        checksum: 0xBEEF,
+    };
+    let encoded = value.encode().unwrap();
+    let expected = [
+        [9, 2].as_slice(),
+        &[0x02, 0x01, 1, 1],
+        &[0x04, 0x03, 0, 0],
+        &[0, 0, 0, 0],
+        0xBEEF_u16.to_le_bytes().as_slice(),
+    ]
+    .concat();
+    assert_eq!(encoded.as_slice(), expected.as_slice());
+
+    let mut aligned = Aligned([0; FixedEntryVecArgs::DATA_LEN]);
+    aligned.0.copy_from_slice(&encoded);
+
+    let view = FixedEntryVecArgs::decode(&aligned.0).unwrap();
+    assert_eq!(view.tag(), 9);
+    assert_eq!(view.entries_capacity(), 3);
+    assert_eq!(view.checksum(), 0xBEEF);
+
+    let entries: wheels::layout::FixedLayoutSlice<'_, FixedEntry> = view.entries();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.get(0).unwrap().id(), 0x0102);
+    assert_eq!(entries.get(0).unwrap().enabled(), Some(true));
+    assert_eq!(entries.get(1).unwrap().id(), 0x0304);
+    assert_eq!(entries.get(1).unwrap().enabled(), None);
+    assert_eq!(
+        entries.iter().map(|entry| entry.id()).collect::<Vec<_>>(),
+        vec![0x0102, 0x0304]
+    );
+}
+
+#[test]
+fn fixed_offset_layout_validates_fixed_layout_vec() {
+    let value = FixedEntryVecArgs {
+        tag: 9,
+        entries: vec![
+            FixedEntry {
+                id: 0x0102,
+                enabled: Some(true),
+            },
+            FixedEntry {
+                id: 0x0304,
+                enabled: None,
+            },
+        ],
+        checksum: 0xBEEF,
+    };
+    let mut encoded = value.encode().unwrap();
+    encoded[8] = 2;
+
+    assert_eq!(
+        FixedEntryVecArgs::decode(&encoded).unwrap_err(),
+        DataLayoutError::InvalidOptionTag
+    );
+
+    encoded[1] = 4;
+    assert_eq!(
+        FixedEntryVecArgs::decode(&encoded).unwrap_err(),
+        DataLayoutError::LengthExceedsCapacity
+    );
+}
+
+#[fixed_offset_layout]
+struct FixedTrailingEntryVecArgs {
+    tag: u8,
+    #[flexible = 1]
+    entries: Vec<FixedEntry>,
+}
+
+#[test]
+fn fixed_offset_layout_supports_trailing_flexible_fixed_layout_vec() {
+    assert_eq!(FixedTrailingEntryVecArgs::MIN_DATA_LEN, 1);
+    assert_eq!(
+        FixedTrailingEntryVecArgs::MAX_DATA_LEN,
+        1 + 1 + 0xFF * FixedEntry::DATA_LEN
+    );
+    assert_eq!(FixedTrailingEntryVecArgs::OFFSETS, [0, 1]);
+
+    let empty = FixedTrailingEntryVecArgs {
+        tag: 7,
+        entries: vec![],
+    };
+    let empty_encoded = empty.encode().unwrap();
+    assert_eq!(empty_encoded, vec![7]);
+    let view = FixedTrailingEntryVecArgs::decode(&empty_encoded).unwrap();
+    assert!(view.entries().is_empty());
+
+    let value = FixedTrailingEntryVecArgs {
+        tag: 7,
+        entries: vec![
+            FixedEntry {
+                id: 0x0102,
+                enabled: Some(false),
+            },
+            FixedEntry {
+                id: 0x0304,
+                enabled: Some(true),
+            },
+        ],
+    };
+    let encoded = value.encode().unwrap();
+    assert_eq!(
+        encoded,
+        [[7, 2].as_slice(), &[0x02, 0x01, 1, 0], &[0x04, 0x03, 1, 1],].concat()
+    );
+
+    let view = FixedTrailingEntryVecArgs::decode(&encoded).unwrap();
+    let entries = view.entries();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.get(0).unwrap().enabled(), Some(false));
+    assert_eq!(entries.get(1).unwrap().enabled(), Some(true));
+}
