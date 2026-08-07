@@ -737,7 +737,7 @@ impl FieldLayout {
                         let element_validation = match elem {
                             VecElementKind::FixedValue(_) => quote!(),
                             VecElementKind::FixedSizeLayout { ty } => quote! {
-                                let _ = ::wheels::layout::LayoutSlice::<#ty>::new(
+                                let _ = ::wheels::layout::FixedLayoutSlice::<#ty>::new(
                                     &bytes[data_offset..end],
                                 )?;
                             },
@@ -1266,19 +1266,19 @@ impl FieldLayout {
                     VecElementKind::FixedSizeLayout { .. } => Ok(quote! {
                         pub fn #field_ident(
                             &self,
-                        ) -> ::wheels::layout::LayoutSlice<'a, #elem_ty> {
+                        ) -> ::wheels::layout::FixedLayoutSlice<'a, #elem_ty> {
                             let offset = #offset_expr;
                             let len = #len_expr;
                             let start = offset + #len_width_lit;
                             let end = start + len * #elem_size;
-                            ::wheels::layout::LayoutSlice::new(&self.bytes[start..end])
+                            ::wheels::layout::FixedLayoutSlice::new(&self.bytes[start..end])
                                 .expect("validated fixed-size layout Vec")
                         }
                     }),
                     VecElementKind::VariableSizeLayout { .. } => Ok(quote! {
                         pub fn #field_ident(
                             &self,
-                        ) -> ::wheels::layout::LayoutList<'a, #elem_ty> {
+                        ) -> ::wheels::layout::VariableLayoutSlice<'a, #elem_ty> {
                             let offset = #offset_expr;
                             let len = #len_expr;
                             let start = offset + #len_width_lit;
@@ -1288,7 +1288,7 @@ impl FieldLayout {
                                 len,
                             )
                             .expect("validated prefix layout Vec");
-                            ::wheels::layout::LayoutList::new(&self.bytes[start..end], len)
+                            ::wheels::layout::VariableLayoutSlice::new(&self.bytes[start..end], len)
                                 .expect("validated prefix layout Vec")
                         }
                     }),

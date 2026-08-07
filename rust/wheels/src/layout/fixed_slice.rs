@@ -7,7 +7,7 @@ use crate::DataLayoutError;
 /// Users do not write this type in their layout structs. They continue to write
 /// `Vec<T>`. For supported scalar/POD element types, generated getters return
 /// `&[T]`. For user-defined fixed-size layout element types, generated getters
-/// return `LayoutSlice<'a, T>` so callers can access each element as
+/// return `FixedLayoutSlice<'a, T>` so callers can access each element as
 /// `T::View<'a>`.
 ///
 /// # Why it exists
@@ -18,17 +18,18 @@ use crate::DataLayoutError;
 ///   `T::View<'a>`.
 /// - Generated views should still expose collection-like access through `len`,
 ///   `is_empty`, `get`, `iter`, and `as_bytes`.
-/// - `LayoutSlice` adapts a `variable_offset_layout` Vec payload into borrowed
-///   `T::View<'a>` values without allocation.
-/// - Prefix-decodable variable-size element layouts use `LayoutList` instead.
+/// - `FixedLayoutSlice` adapts a `variable_offset_layout` Vec payload into
+///   borrowed `T::View<'a>` values without allocation.
+/// - Variable-size element layouts use `VariableLayoutSlice` instead.
 ///
-/// A `LayoutSlice` contains only the active Vec payload: exactly `len * T::DATA_LEN`
-/// bytes. There is no reserved capacity beyond the encoded length. This differs from
-/// a Vec field in `fixed_offset_layout`, which has both a logical `len` and a
-/// schema-level `capacity` with reserved trailing storage.
+/// A `FixedLayoutSlice` contains only the active Vec payload: exactly
+/// `len * T::DATA_LEN` bytes. There is no reserved capacity beyond the encoded
+/// length. This differs from a Vec field in `fixed_offset_layout`, which has
+/// both a logical `len` and a schema-level `capacity` with reserved trailing
+/// storage.
 ///
 #[derive(Clone, Copy, Debug)]
-pub struct LayoutSlice<'a, T>
+pub struct FixedLayoutSlice<'a, T>
 where
     T: FixedSizeLayout,
 {
@@ -36,7 +37,7 @@ where
     _marker: core::marker::PhantomData<T>,
 }
 
-impl<'a, T> LayoutSlice<'a, T>
+impl<'a, T> FixedLayoutSlice<'a, T>
 where
     T: FixedSizeLayout,
 {
@@ -80,15 +81,15 @@ where
         )
     }
 
-    pub fn iter(&self) -> LayoutSliceIter<'a, T> {
-        LayoutSliceIter {
+    pub fn iter(&self) -> FixedLayoutSliceIter<'a, T> {
+        FixedLayoutSliceIter {
             bytes: self.bytes,
             _marker: core::marker::PhantomData,
         }
     }
 }
 
-pub struct LayoutSliceIter<'a, T>
+pub struct FixedLayoutSliceIter<'a, T>
 where
     T: FixedSizeLayout,
 {
@@ -96,7 +97,7 @@ where
     _marker: core::marker::PhantomData<T>,
 }
 
-impl<'a, T> Iterator for LayoutSliceIter<'a, T>
+impl<'a, T> Iterator for FixedLayoutSliceIter<'a, T>
 where
     T: FixedSizeLayout,
 {

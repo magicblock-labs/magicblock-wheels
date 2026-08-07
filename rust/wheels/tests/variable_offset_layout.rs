@@ -420,7 +420,7 @@ fn variable_layout_supports_prefix_layout_vec() {
     assert_eq!(view.version(), 7);
     assert_eq!(view.checksum(), 0xBEEF);
 
-    let entries: wheels::layout::LayoutList<'_, PrefixEntry> = view.entries();
+    let entries: wheels::layout::VariableLayoutSlice<'_, PrefixEntry> = view.entries();
     assert_eq!(entries.len(), 2);
     assert!(!entries.is_empty());
     assert_eq!(entries.as_bytes(), &encoded[2..encoded.len() - 2]);
