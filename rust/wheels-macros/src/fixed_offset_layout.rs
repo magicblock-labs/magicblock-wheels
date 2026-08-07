@@ -259,6 +259,16 @@ pub(crate) fn expand_fixed_offset_layout(
             }
         }
     };
+    let layout_bounds_impl = if has_trailing_flexible_field {
+        quote! {
+            impl ::wheels::layout::LayoutBounds for #struct_name {
+                const MIN_DATA_LEN: usize = #struct_name::MIN_DATA_LEN;
+                const MAX_DATA_LEN: usize = #struct_name::MAX_DATA_LEN;
+            }
+        }
+    } else {
+        quote!()
+    };
 
     Ok(quote! {
         #emitted_input
@@ -471,6 +481,8 @@ pub(crate) fn expand_fixed_offset_layout(
         }
 
         #decode_trait_impls
+
+        #layout_bounds_impl
 
         #[allow(dead_code)]
         #[derive(Debug)]

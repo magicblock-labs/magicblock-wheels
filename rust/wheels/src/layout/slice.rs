@@ -6,8 +6,9 @@ use crate::DataLayoutError;
 ///
 /// Users do not write this type in their layout structs. They continue to write
 /// `Vec<T>`. For supported scalar/POD element types, generated getters return
-/// `&[T]`. For user-defined layout element types, generated getters return
-/// `LayoutSlice<'a, T>` so callers can access each element as `T::View<'a>`.
+/// `&[T]`. For user-defined fixed-size layout element types, generated getters
+/// return `LayoutSlice<'a, T>` so callers can access each element as
+/// `T::View<'a>`.
 ///
 /// # Why it exists
 ///
@@ -19,6 +20,7 @@ use crate::DataLayoutError;
 ///   `is_empty`, `get`, `iter`, and `as_bytes`.
 /// - `LayoutSlice` adapts a `variable_offset_layout` Vec payload into borrowed
 ///   `T::View<'a>` values without allocation.
+/// - Prefix-decodable variable-size element layouts use `LayoutList` instead.
 ///
 /// A `LayoutSlice` contains only the active Vec payload: exactly `len * T::DATA_LEN`
 /// bytes. There is no reserved capacity beyond the encoded length. This differs from

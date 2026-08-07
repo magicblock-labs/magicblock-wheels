@@ -246,6 +246,12 @@ pub fn fixed_offset_layout(attr: TokenStream, item: TokenStream) -> TokenStream 
 ///     `Pubkey` is encoded as 32 raw bytes and views return borrowed keys.
 ///   - `Vec<Pubkey>`/`Vec<Address>` is supported and views return borrowed key
 ///     slices.
+///   - `Vec<T>` for user-defined layout element types requires
+///     `#[element_size = fixed]` or `#[element_size = variable]`.
+///     With `fixed`, `T` must implement `FixedSizeLayout` and generated views
+///     return `LayoutSlice<'_, T>`. With `variable`, `T` must implement
+///     `Encodable`, `PrefixDecodable`, and `LayoutBounds`, and generated views
+///     return `LayoutList<'_, T>`.
 ///
 /// Field attributes:
 ///   - `#[flexible = N]`
@@ -266,6 +272,17 @@ pub fn fixed_offset_layout(attr: TokenStream, item: TokenStream) -> TokenStream 
 ///     Length is encoded as an unsigned little-endian integer stored in those
 ///     `N` bytes. For `N = 8`, the supported Vec length is still capped at
 ///     `u32::MAX`.
+///
+///   - `#[element_size = fixed | variable]`
+///
+///     - Mandatory: yes, field-type: `Vec<T>` where `T` is a user-defined
+///       layout element type.
+///     - Not allowed for supported scalar/POD/key Vec element types like
+///       `Vec<u8>` or `Vec<Pubkey>`.
+///     - `fixed` means each element has a constant encoded width and the
+///       generated getter returns `LayoutSlice<'_, T>`.
+///     - `variable` means each element is self-delimiting through prefix
+///       decoding and the generated getter returns `LayoutList<'_, T>`.
 ///
 /// APIs
 /// ====

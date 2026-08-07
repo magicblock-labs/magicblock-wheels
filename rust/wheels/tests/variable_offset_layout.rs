@@ -3,7 +3,7 @@ extern crate alloc;
 use pinocchio::{error::ProgramError, Address};
 use wheels::{
     fixed_offset_layout,
-    layout::{Decodable, Encodable, PrefixDecodable},
+    layout::{Decodable, Encodable, LayoutBounds, PrefixDecodable},
     variable_offset_layout, DataLayoutError, Pubkey,
 };
 
@@ -194,6 +194,7 @@ struct FixedVerifierEntry {
 struct FixedEntryRegistryArgs {
     registry_revision: u64,
     #[flexible = 4]
+    #[element_size = fixed]
     entries: Vec<FixedVerifierEntry>,
 }
 
@@ -201,6 +202,7 @@ struct FixedEntryRegistryArgs {
 struct FixedEntryRegistryWithChecksumArgs {
     registry_revision: u64,
     #[flexible = 1]
+    #[element_size = fixed]
     entries: Vec<FixedVerifierEntry>,
     checksum: u16,
 }
@@ -209,6 +211,7 @@ struct FixedEntryRegistryWithChecksumArgs {
 struct TinyFixedEntryRegistryArgs {
     registry_revision: u64,
     #[flexible = 1]
+    #[element_size = fixed]
     entries: Vec<FixedVerifierEntry>,
 }
 
@@ -347,6 +350,125 @@ fn variable_layout_rejects_fixed_size_layout_vec_capacity_overflow() {
     assert_eq!(
         value.encode().unwrap_err(),
         DataLayoutError::LengthExceedsCapacity
+    );
+}
+
+#[variable_offset_layout(buffer_offset = unaligned)]
+struct PrefixEntry {
+    id: u16,
+    #[flexible = 1]
+    payload: Vec<u8>,
+}
+
+#[variable_offset_layout(buffer_offset = unaligned)]
+struct PrefixEntryRegistryArgs {
+    version: u8,
+    #[flexible = 1]
+    #[element_size = variable]
+    entries: Vec<PrefixEntry>,
+    checksum: u16,
+}
+
+#[variable_offset_layout(buffer_offset = unaligned)]
+struct PrefixEntryLogArgs {
+    #[flexible = 1]
+    #[element_size = variable]
+    entries: Vec<PrefixEntry>,
+}
+
+#[test]
+fn variable_layout_supports_prefix_layout_vec() {
+    assert_eq!(
+        <PrefixEntry as LayoutBounds>::MIN_DATA_LEN,
+        PrefixEntry::DATA_LEN_RANGE.0
+    );
+    assert_eq!(
+        <PrefixEntry as LayoutBounds>::MAX_DATA_LEN,
+        PrefixEntry::DATA_LEN_RANGE.1
+    );
+    assert_eq!(PrefixEntry::DATA_LEN_RANGE, (3, 258));
+    assert_eq!(PrefixEntryRegistryArgs::DATA_LEN_RANGE, (4, 65794));
+
+    let value = PrefixEntryRegistryArgs {
+        version: 7,
+        entries: vec![
+            PrefixEntry {
+                id: 0x1001,
+                payload: vec![9, 8],
+            },
+            PrefixEntry {
+                id: 0x1002,
+                payload: vec![],
+            },
+        ],
+        checksum: 0xBEEF,
+    };
+
+    let encoded = value.encode().unwrap();
+    let expected = [
+        &[7, 2],
+        0x1001_u16.to_le_bytes().as_slice(),
+        &[2, 9, 8],
+        0x1002_u16.to_le_bytes().as_slice(),
+        &[0],
+        0xBEEF_u16.to_le_bytes().as_slice(),
+    ]
+    .concat();
+    assert_eq!(encoded, expected);
+
+    let view = PrefixEntryRegistryArgs::decode(&encoded).unwrap();
+    assert_eq!(view.version(), 7);
+    assert_eq!(view.checksum(), 0xBEEF);
+
+    let entries: wheels::layout::LayoutList<'_, PrefixEntry> = view.entries();
+    assert_eq!(entries.len(), 2);
+    assert!(!entries.is_empty());
+    assert_eq!(entries.as_bytes(), &encoded[2..encoded.len() - 2]);
+
+    let first = entries.get(0).unwrap();
+    assert_eq!(first.id(), 0x1001);
+    assert_eq!(first.payload(), &[9, 8]);
+
+    let second = entries.get(1).unwrap();
+    assert_eq!(second.id(), 0x1002);
+    assert_eq!(second.payload(), &[]);
+    assert!(entries.get(2).is_none());
+
+    let payload_lens = entries
+        .iter()
+        .map(|entry| entry.payload().len())
+        .collect::<Vec<_>>();
+    assert_eq!(payload_lens, vec![2, 0]);
+}
+
+#[test]
+fn variable_layout_rejects_invalid_prefix_layout_vec() {
+    let malformed_entry = [0x1001_u16.to_le_bytes().as_slice(), &[2, 9]].concat();
+    let encoded = [&[1], malformed_entry.as_slice()].concat();
+    assert_eq!(
+        PrefixEntryLogArgs::decode(&encoded).unwrap_err(),
+        DataLayoutError::TruncatedVectorPayload
+    );
+
+    let value = PrefixEntryRegistryArgs {
+        version: 7,
+        entries: vec![
+            PrefixEntry {
+                id: 0x1001,
+                payload: vec![9, 8],
+            },
+            PrefixEntry {
+                id: 0x1002,
+                payload: vec![],
+            },
+        ],
+        checksum: 0xBEEF,
+    };
+    let mut encoded = value.encode().unwrap();
+    encoded[1] = 3;
+    assert_eq!(
+        PrefixEntryRegistryArgs::decode(&encoded).unwrap_err(),
+        DataLayoutError::MissingLengthHeader
     );
 }
 
