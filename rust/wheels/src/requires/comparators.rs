@@ -149,7 +149,7 @@ macro_rules! require_gt {
 ///
 /// Require $option to be Some, and produce the value
 ///
-/// $option: Option<T>
+/// `$option: Option<T>`
 ///
 #[macro_export]
 macro_rules! require_some {
