@@ -1,7 +1,9 @@
 use crate::DataLayoutError;
 
+mod list;
 mod slice;
 
+pub use list::{LayoutList, LayoutListIter};
 pub use slice::{LayoutSlice, LayoutSliceIter};
 
 pub trait DataLayoutKind {
@@ -10,6 +12,25 @@ pub trait DataLayoutKind {
 
 pub trait FixedSizeLayout: Encodable + Decodable {
     const DATA_LEN: usize;
+}
+
+///
+/// Compile-time encoded length bounds for generated layouts.
+///
+/// `LayoutBounds` lets a parent layout reserve and validate space for nested
+/// prefix-decodable elements whose exact encoded size is known only at runtime.
+///
+pub trait LayoutBounds {
+    const MIN_DATA_LEN: usize;
+    const MAX_DATA_LEN: usize;
+}
+
+impl<T> LayoutBounds for T
+where
+    T: FixedSizeLayout,
+{
+    const MIN_DATA_LEN: usize = T::DATA_LEN;
+    const MAX_DATA_LEN: usize = T::DATA_LEN;
 }
 
 pub trait Encodable {
