@@ -11,6 +11,41 @@
 //! `Vec<T>` and `Option<T>`. Helper view types like [`LayoutSlice`] and
 //! [`LayoutList`] appear only in generated view getters.
 //!
+//! # Why Layouts Exist
+//!
+//! Layouts are not intended to be a better general-purpose serializer than
+//! Borsh or bincode. Those libraries serialize Rust values into bytes and
+//! deserialize bytes back into Rust values. Wheels layouts are for cases where
+//! the encoded bytes are themselves the data structure: validated storage or
+//! argument layouts with generated borrowed views.
+//!
+//! The clearest example is account storage. Borsh and bincode do not model
+//! "this `Vec` has capacity 72 in the account, but only len 5 is active." That
+//! is not ordinary serialization anymore; it is storage layout. A layout can
+//! reserve schema-level capacity, expose the active length, and still let code
+//! inspect the encoded account bytes without rebuilding an owned value.
+//!
+//! The main design goal is CU-friendly access to encoded on-chain data. To
+//! achieve that, layouts prioritize:
+//!
+//! - **zero-alloc** decode;
+//! - practically **zero-copy** access, copying only small scalar values where a
+//!   copy is cheaper and simpler than a reference;
+//! - stable field offsets for account/state data, so fixed-position fields can
+//!   be accessed, validated, and updated directly from their schema offsets
+//!   while any flexible payload is kept at the end. This applies specifically
+//!   to [`fixed_offset_layout!`](crate::fixed_offset_layout);
+//! - explicit low-level choices for capacity, length-header width, alignment,
+//!   and fixed-size versus variable-size nested elements;
+//! - compact encodings for on-chain payloads where every byte and compute unit
+//!   matters.
+//!
+//! This comes with a real cost: layouts expose more low-level decisions than
+//! Borsh or bincode. That is intentional. When compute units, storage size, or
+//! account layout semantics matter, the macro asks users to choose explicitly
+//! instead of relying on hidden defaults. For ordinary serialization, prefer
+//! Borsh or bincode.
+//!
 //! # Choosing a Layout Macro
 //!
 //! Wheels provides two layout macros:
