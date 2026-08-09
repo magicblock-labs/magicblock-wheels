@@ -9,6 +9,12 @@ use pinocchio::error::ProgramError;
 use super::LayoutStorageMut;
 use crate::DataLayoutError;
 
+// CHECKPOINT(CU): generated fixed-layout getters pass compile-time constant
+// field offsets into these generic mutable helpers. We store those offsets as
+// runtime `usize` fields to keep the helper API small and avoid const-generic
+// return types or field-specific generated wrappers. If CU measurements show
+// this matters for very small budgets, benchmark const-generic offsets.
+
 /// Mutable typed view over an aligned fixed-value layout field.
 ///
 /// This guard owns the backing storage borrow, so callers can use it like a

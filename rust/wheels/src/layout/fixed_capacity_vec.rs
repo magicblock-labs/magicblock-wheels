@@ -12,6 +12,12 @@ use crate::DataLayoutError;
 /// `#[capacity = N] Vec<T>` fields. It can grow and shrink the active logical
 /// length within the schema-level capacity, but it never resizes the backing
 /// storage.
+///
+/// CHECKPOINT(CU): generated fixed-layout getters pass compile-time constant
+/// offsets and element metadata into this generic helper. They are stored as
+/// runtime fields to keep return types simple. If CU measurements show this
+/// matters for very small budgets, benchmark const-generic offsets/metadata or
+/// field-specific generated wrappers.
 pub struct FixedCapacityVec<'a, T, S: ?Sized, K = FixedValueElement> {
     storage: &'a S,
     offset: usize,
