@@ -36,6 +36,12 @@ enum FlexibleVecSource<'a, S: ?Sized> {
 /// decoding account/storage bytes, however, the final field may include spare
 /// trailing storage. `len()` reports the active element count, while
 /// `capacity()` reports how many elements fit in the supplied backing storage.
+///
+/// CHECKPOINT(CU): generated fixed-layout getters pass compile-time constant
+/// offsets and element metadata into this generic helper. They are stored as
+/// runtime fields to keep return types simple. If CU measurements show this
+/// matters for very small budgets, benchmark const-generic offsets/metadata or
+/// field-specific generated wrappers.
 pub struct FlexibleVec<'a, T, S: ?Sized = (), K = FixedValueElement> {
     source: FlexibleVecSource<'a, S>,
     offset: usize,
