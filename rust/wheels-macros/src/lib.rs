@@ -107,6 +107,8 @@ mod variable_offset_layout;
 ///     - The encoded Vec length uses a 1-byte header when `N <= 255`, otherwise
 ///       a 2-byte header.
 ///     - Generated views expose an additional `<field>_capacity()` method.
+///     - Generated mutable views expose `<field>_mut()` returning
+///       `FixedCapacityVec`.
 ///
 ///   - `#[flexible = N]`
 ///
@@ -116,8 +118,7 @@ mod variable_offset_layout;
 ///     - The field contributes only its active payload bytes to canonical
 ///       encoded length.
 ///     - Generated immutable getters return `FlexibleVec`.
-///     - Generated mutable views expose `<field>_mut()` for this field when the
-///       layout is created with `decode_mut(storage)`.
+///     - Generated mutable views expose `<field>_mut()` returning `FlexibleVec`.
 ///
 ///   - `#[flexible]`
 ///
@@ -160,10 +161,12 @@ mod variable_offset_layout;
 ///     `FixedSizeLayout`
 ///
 /// Methods:
-///   - trailing-flexible Vec layouts also emit
-///     `decode_mut(storage: &impl LayoutStorageMut)`, returning a mutable
-///     storage-backed view whose trailing Vec getter supports `push`, `pop`,
-///     `set`, `truncate`, and `clear`.
+///   - all layouts emit `decode_mut(storage: &impl LayoutStorageMut)`,
+///     returning a mutable storage-backed view
+///   - mutable views expose `<field>_mut()` helpers. Plain aligned POD fields
+///     return a mutable guard, encoded bool/Option fields return slot helpers,
+///     fixed-capacity Vec fields return `FixedCapacityVec`, and trailing
+///     flexible Vec fields return `FlexibleVec`.
 ///
 /// Import the relevant traits from `wheels::layout` to call `encode`,
 /// `encode_to`, `decode`, or `decode_prefix`. These APIs return

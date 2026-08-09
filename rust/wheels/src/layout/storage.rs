@@ -23,8 +23,8 @@ pub trait LayoutStorage {
 ///
 /// Implement this trait for account/storage wrappers that can expose mutable
 /// bytes and resize the underlying data buffer. Generated `decode_mut()`
-/// methods use it to let a trailing flexible Vec grow inside fixed-layout
-/// account storage.
+/// methods use it for fixed-layout account mutation. Fixed-capacity fields
+/// mutate in place; trailing flexible fields may also resize the backing data.
 pub trait LayoutStorageMut: LayoutStorage {
     type RefMut<'a>: DerefMut<Target = [u8]>
     where
