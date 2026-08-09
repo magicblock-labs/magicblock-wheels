@@ -101,6 +101,38 @@
 //! | Prefix decoding | Constant-size layouts implement [`PrefixDecodable`]. Trailing-flexible layouts implement [`Decodable`]; final flexible Vec decodes the supplied storage region, while final flexible Option remains exactly framed. | Normal layouts implement [`PrefixDecodable`]. Layouts using `option = implicit` need exact framing and implement [`Decodable`]. |
 //! | Alignment | Use `buffer_offset = 0..=7` when the input starts at a known offset from an 8-byte aligned base. Use `buffer_offset = unaligned` only when generated views do not borrow alignment-sensitive fields. | Use `buffer_offset = 0..=7` when the input starts at a known offset from an 8-byte aligned base; use `buffer_offset = unaligned` only when generated views do not borrow alignment-sensitive fields. |
 //!
+//! # Mutability
+//!
+//! Mutability is supported only by
+//! [`fixed_offset_layout!`](crate::fixed_offset_layout). Every fixed-offset
+//! layout generates `decode_mut(storage)`, where `storage` implements
+//! [`LayoutStorageMut`]. This is designed for account/state storage: fixed
+//! fields can be updated in place, fixed-capacity Vec fields can change active
+//! `len` within reserved storage, and trailing flexible fields can resize the
+//! backing storage when their encoded length changes.
+//!
+//! Generated mutable views expose `<field>_mut()` helpers instead of returning
+//! the same values as immutable getters. This matters because account data is
+//! borrowed through a storage guard; a mutable helper either owns that borrow
+//! guard or performs short-lived `get`/`set` operations. It also avoids
+//! treating encoded layouts like normal Rust layouts: encoded `bool`,
+//! `Option<T>`, and `Vec<T>` are byte-level layouts, not Rust `bool`,
+//! `Option<T>`, or `Vec<T>` values in memory.
+//!
+//! | Field form in `fixed_offset_layout` | Generated mutable helper | Mutation behavior |
+//! |---|---|---|
+//! | Aligned integer primitives, [`Pubkey`](crate::Pubkey)/`Address`, and fixed-size integer arrays | [`LayoutValueMut`] | Owns the storage borrow and implements `DerefMut<Target = T>` for direct in-place updates.<br><br>`*view.amount_mut()? += 1;` |
+//! | Unaligned integer primitives or fixed-size integer arrays | [`LayoutCopyMut`] | Exposes `get()` and `set(value)` and writes bytes without creating an invalid `&mut T`.<br><br>`view.amount_mut()?.set(42)?;` |
+//! | `bool` | [`LayoutBoolMut`] | Exposes `get()` and `set(bool)` because the encoded form is a backing `u8`.<br><br>`view.enabled_mut()?.set(true)?;` |
+//! | Fixed `Option<T>` | [`LayoutOptionMut`] or [`LayoutBoolOptionMut`] | Updates the tag and payload in place; the reserved option slot size does not change.<br><br>`view.authority_mut()?.set(Some(key))?;` |
+//! | Trailing flexible `Option<T>` | [`LayoutOptionMut`] or [`LayoutBoolOptionMut`] | `None` resizes storage back to the field offset; `Some` resizes to tag plus payload length.<br><br>`view.delegate_mut()?.set(None)?;` |
+//! | `#[capacity = N] Vec<T>` | [`FixedCapacityVec`] | Can `push`, `pop`, `set`, `truncate`, and `clear` active elements up to schema capacity `N`; it never resizes storage.<br><br>`view.items_mut()?.push(item)?;` |
+//! | Final `#[flexible = N] Vec<T>` | [`FlexibleVec`] | Can `push`, `pop`, `set`, `truncate`, and `clear`; it may resize storage to grow capacity because the field is trailing.<br><br>`view.tail_mut()?.push(item)?;` |
+//!
+//! In other words, only a trailing flexible Vec can expand its backing
+//! capacity. A non-trailing fixed-capacity Vec can still expand its active
+//! length, but only up to the capacity reserved by the schema.
+//!
 //! # Practical Guidelines
 //!
 //! Use [`fixed_offset_layout!`](crate::fixed_offset_layout) when the encoded
