@@ -1,9 +1,12 @@
 extern crate alloc;
 
+use std::cell::{Ref, RefCell, RefMut};
+
+use pinocchio::error::ProgramError;
 use pinocchio::Address;
 use wheels::{
     fixed_offset_layout,
-    layout::{Decodable, Encodable, PrefixDecodable},
+    layout::{Decodable, Encodable, LayoutStorage, LayoutStorageMut, PrefixDecodable},
     DataLayoutError, Pubkey,
 };
 
@@ -16,6 +19,49 @@ fn aligned_copy<const N: usize>(bytes: &[u8]) -> Aligned<N> {
     let mut aligned = Aligned([0; N]);
     aligned.0[..bytes.len()].copy_from_slice(bytes);
     aligned
+}
+
+struct TestStorage(RefCell<Vec<u8>>);
+
+impl TestStorage {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self(RefCell::new(bytes))
+    }
+
+    fn bytes(&self) -> Vec<u8> {
+        self.0.borrow().clone()
+    }
+}
+
+impl LayoutStorage for TestStorage {
+    type Ref<'a>
+        = Ref<'a, [u8]>
+    where
+        Self: 'a;
+
+    fn data_len(&self) -> usize {
+        self.0.borrow().len()
+    }
+
+    fn borrow_data(&self) -> Result<Self::Ref<'_>, ProgramError> {
+        Ok(Ref::map(self.0.borrow(), Vec::as_slice))
+    }
+}
+
+impl LayoutStorageMut for TestStorage {
+    type RefMut<'a>
+        = RefMut<'a, [u8]>
+    where
+        Self: 'a;
+
+    fn borrow_data_mut(&self) -> Result<Self::RefMut<'_>, ProgramError> {
+        Ok(RefMut::map(self.0.borrow_mut(), Vec::as_mut_slice))
+    }
+
+    fn resize(&self, new_len: usize) -> Result<(), ProgramError> {
+        self.0.borrow_mut().resize(new_len, 0);
+        Ok(())
+    }
 }
 
 #[fixed_offset_layout(buffer_offset = 0)]
@@ -124,7 +170,10 @@ fn fixed_offset_layout_supports_trailing_flexible_vec() {
     assert_eq!(view.header(), 7);
     assert_eq!(view.reserved(), &[1, 2]);
     assert_eq!(view.reserved_capacity(), 4);
-    assert_eq!(view.tail(), &[9, 8, 7]);
+    let tail = view.tail();
+    assert_eq!(tail.as_slice(), &[9, 8, 7]);
+    assert_eq!(tail.len(), 3);
+    assert_eq!(tail.capacity(), 3);
 
     let empty_tail = FixedTrailingVecArgs {
         header: 7,
@@ -139,26 +188,95 @@ fn fixed_offset_layout_supports_trailing_flexible_vec() {
 
     let aligned = aligned_copy::<64>(&empty_encoded);
     let view = FixedTrailingVecArgs::decode(&aligned.0[..empty_encoded.len()]).unwrap();
-    assert_eq!(view.tail(), &[]);
+    let tail = view.tail();
+    assert_eq!(tail.as_slice(), &[]);
+    assert_eq!(tail.len(), 0);
+    assert_eq!(tail.capacity(), 0);
 }
 
 #[test]
 fn fixed_offset_layout_rejects_invalid_trailing_flexible_vec_encoding() {
     let base = [7_u16.to_le_bytes().as_slice(), &[0, 0, 0, 0, 0]].concat();
 
-    let zero_len_header = [base.as_slice(), 0_u16.to_le_bytes().as_slice()].concat();
-    let aligned = aligned_copy::<64>(&zero_len_header);
+    let empty_storage = [base.as_slice(), 0_u16.to_le_bytes().as_slice()].concat();
+    let aligned = aligned_copy::<64>(&empty_storage);
+    let view = FixedTrailingVecArgs::decode(&aligned.0[..empty_storage.len()]).unwrap();
+    assert_eq!(view.tail().len(), 0);
+    assert_eq!(view.tail().capacity(), 0);
+
+    let missing_header = [base.as_slice(), &[9]].concat();
+    let aligned = aligned_copy::<64>(&missing_header);
     assert_eq!(
-        FixedTrailingVecArgs::decode(&aligned.0[..zero_len_header.len()]).unwrap_err(),
-        DataLayoutError::InvalidDataLength
+        FixedTrailingVecArgs::decode(&aligned.0[..missing_header.len()]).unwrap_err(),
+        DataLayoutError::MissingLengthHeader
     );
 
     let truncated_payload = [base.as_slice(), 3_u16.to_le_bytes().as_slice(), &[9]].concat();
     let aligned = aligned_copy::<64>(&truncated_payload);
     assert_eq!(
         FixedTrailingVecArgs::decode(&aligned.0[..truncated_payload.len()]).unwrap_err(),
-        DataLayoutError::TruncatedVectorPayload
+        DataLayoutError::LengthExceedsCapacity
     );
+}
+
+#[test]
+fn fixed_offset_layout_exposes_trailing_flexible_vec_storage_capacity() {
+    let storage = [
+        7_u16.to_le_bytes().as_slice(),
+        &[2, 1, 2, 0, 0],
+        3_u16.to_le_bytes().as_slice(),
+        &[9, 8, 7],
+        &[0, 0, 0, 0],
+    ]
+    .concat();
+    let aligned = aligned_copy::<64>(&storage);
+
+    let view = FixedTrailingVecArgs::decode(&aligned.0[..storage.len()]).unwrap();
+    let tail = view.tail();
+    assert_eq!(tail.as_slice(), &[9, 8, 7]);
+    assert_eq!(tail.len(), 3);
+    assert_eq!(tail.capacity(), 7);
+    assert_eq!(tail.encoded_len(), 2 + 3);
+    assert_eq!(tail.storage_len(), 2 + 7);
+    assert_eq!(
+        tail.storage_bytes(),
+        [3_u16.to_le_bytes().as_slice(), &[9, 8, 7], &[0, 0, 0, 0]].concat()
+    );
+}
+
+#[test]
+fn fixed_offset_layout_mutates_trailing_flexible_vec_storage() {
+    let storage = TestStorage::new([7_u16.to_le_bytes().as_slice(), &[0, 0, 0, 0, 0]].concat());
+    let mut view = FixedTrailingVecArgs::decode_mut(&storage).unwrap();
+
+    let mut tail = view.tail_mut().unwrap();
+    assert_eq!(tail.len(), 0);
+    assert_eq!(tail.capacity(), 0);
+
+    tail.push(9).unwrap();
+    tail.push(8).unwrap();
+    tail.set(1, 7).unwrap();
+    assert_eq!(tail.pop().unwrap(), Some(7));
+    tail.push(6).unwrap();
+    assert_eq!(tail.len(), 2);
+    assert_eq!(tail.capacity(), 2);
+
+    let bytes = storage.bytes();
+    let aligned = aligned_copy::<64>(&bytes);
+    let view = FixedTrailingVecArgs::decode(&aligned.0[..bytes.len()]).unwrap();
+    assert_eq!(view.tail().as_slice(), &[9, 6]);
+
+    let mut view = FixedTrailingVecArgs::decode_mut(&storage).unwrap();
+    let mut tail = view.tail_mut().unwrap();
+    tail.clear().unwrap();
+    assert_eq!(tail.len(), 0);
+    assert_eq!(tail.capacity(), 2);
+
+    let bytes = storage.bytes();
+    let aligned = aligned_copy::<64>(&bytes);
+    let view = FixedTrailingVecArgs::decode(&aligned.0[..bytes.len()]).unwrap();
+    assert_eq!(view.tail().len(), 0);
+    assert_eq!(view.tail().capacity(), 2);
 }
 
 #[fixed_offset_layout(buffer_offset = 0)]
@@ -467,4 +585,59 @@ fn fixed_offset_layout_supports_trailing_flexible_fixed_layout_vec() {
     assert_eq!(entries.len(), 2);
     assert_eq!(entries.get(0).unwrap().enabled(), Some(false));
     assert_eq!(entries.get(1).unwrap().enabled(), Some(true));
+}
+
+#[test]
+fn fixed_offset_layout_mutates_trailing_flexible_fixed_layout_vec_storage() {
+    let storage = TestStorage::new(vec![7]);
+    let mut view = FixedTrailingEntryVecArgs::decode_mut(&storage).unwrap();
+
+    let mut entries = view.entries_mut().unwrap();
+    assert_eq!(entries.len(), 0);
+    assert_eq!(entries.capacity(), 0);
+
+    entries
+        .push(&FixedEntry {
+            id: 0x0102,
+            enabled: Some(false),
+        })
+        .unwrap();
+    entries
+        .push(&FixedEntry {
+            id: 0x0304,
+            enabled: Some(true),
+        })
+        .unwrap();
+    entries
+        .set(
+            1,
+            &FixedEntry {
+                id: 0x0506,
+                enabled: None,
+            },
+        )
+        .unwrap();
+    entries.pop().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.capacity(), 2);
+
+    let bytes = storage.bytes();
+    let aligned = aligned_copy::<64>(&bytes);
+    let view = FixedTrailingEntryVecArgs::decode(&aligned.0[..bytes.len()]).unwrap();
+    let entries = view.entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.capacity(), 2);
+    assert_eq!(entries.get(0).unwrap().id(), 0x0102);
+    assert_eq!(entries.get(0).unwrap().enabled(), Some(false));
+}
+
+#[test]
+fn fixed_offset_layout_rejects_non_element_sized_trailing_storage() {
+    let storage = [7, 0, 0].as_slice();
+    let aligned = aligned_copy::<64>(storage);
+
+    assert_eq!(
+        FixedTrailingEntryVecArgs::decode(&aligned.0[..storage.len()]).unwrap_err(),
+        DataLayoutError::InvalidDataLength
+    );
 }
