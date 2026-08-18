@@ -1,9 +1,4 @@
-///
-/// Require $key1 == $key2
-///
-/// $key1 : &Address
-/// $key2 : &Address
-///
+/// Require left `&Address` == right `&Address`.
 #[macro_export]
 macro_rules! require_eq_keys {
     ( $key1:expr, $key2:expr, $error:expr) => {{
@@ -20,12 +15,7 @@ macro_rules! require_eq_keys {
     }};
 }
 
-///
-/// Require $key1 != $key2
-///
-/// $key1 : &Address
-/// $key2 : &Address
-///
+/// Require left `&Address` != right `&Address`.
 #[macro_export]
 macro_rules! require_ne_keys {
     ( $key1:expr, $key2:expr, $error:expr) => {{
