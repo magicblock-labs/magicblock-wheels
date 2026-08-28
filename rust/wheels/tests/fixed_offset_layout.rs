@@ -604,7 +604,7 @@ fn fixed_offset_layout_mutates_fixed_capacity_value_vec_storage() {
     assert_eq!(view.checksum(), 0xBEEF);
 }
 
-#[fixed_offset_layout(buffer_offset = unaligned)]
+#[fixed_offset_layout(buffer_offset = unknown)]
 #[derive(Clone)]
 struct FixedEntry {
     id: u16,

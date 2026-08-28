@@ -52,7 +52,7 @@ pub(crate) fn expand_fixed_offset_layout(
                 }
             }
         }
-        BufferOffset::Unaligned => quote!(),
+        BufferOffset::Unknown => quote!(),
     };
 
     let Fields::Named(fields) = &mut emitted_input.fields else {
@@ -749,11 +749,11 @@ impl FixedFieldKind {
                 if align <= 1 {
                     return Ok(None);
                 }
-                if matches!(buffer_offset, BufferOffset::Unaligned) {
+                if matches!(buffer_offset, BufferOffset::Unknown) {
                     return Err(syn::Error::new(
                         field_ident.span(),
                         format!(
-                            "field `{}` cannot be borrowed with `buffer_offset = unaligned`: it requires {}-byte alignment, but the input slice may start at any address",
+                            "field `{}` cannot be borrowed with `buffer_offset = unknown`: it requires {}-byte alignment, but the input slice may start at any address",
                             field_ident, align
                         ),
                     ));
@@ -816,11 +816,11 @@ impl FixedFieldKind {
                 if align <= 1 {
                     return Ok(None);
                 }
-                if matches!(buffer_offset, BufferOffset::Unaligned) {
+                if matches!(buffer_offset, BufferOffset::Unknown) {
                     return Err(syn::Error::new(
                         field_ident.span(),
                         format!(
-                            "field `{}` cannot expose a slice view with `buffer_offset = unaligned`: its elements require {}-byte alignment, but the input slice may start at any address",
+                            "field `{}` cannot expose a slice view with `buffer_offset = unknown`: its elements require {}-byte alignment, but the input slice may start at any address",
                             field_ident, align
                         ),
                     ));
@@ -1559,14 +1559,14 @@ struct LayoutArgs {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BufferOffset {
     Fixed(usize),
-    Unaligned,
+    Unknown,
 }
 
 impl BufferOffset {
     fn value(self) -> Option<usize> {
         match self {
             Self::Fixed(value) => Some(value),
-            Self::Unaligned => None,
+            Self::Unknown => None,
         }
     }
 }
@@ -1575,7 +1575,7 @@ fn parse_args(attr: &str) -> syn::Result<LayoutArgs> {
     if attr.trim().is_empty() {
         return Err(syn::Error::new(
             Span::call_site(),
-            "fixed_offset_layout requires `buffer_offset = 0..=7` or `buffer_offset = unaligned`",
+            "fixed_offset_layout requires `buffer_offset = 0..=7` or `buffer_offset = unknown`",
         ));
     }
 
@@ -1603,30 +1603,30 @@ fn parse_args(attr: &str) -> syn::Result<LayoutArgs> {
                     let Some(ident) = value.path.get_ident() else {
                         return Err(syn::Error::new_spanned(
                             value,
-                            "buffer_offset must be an integer in 0..=7 or `unaligned`",
+                            "buffer_offset must be an integer in 0..=7 or `unknown`",
                         ));
                     };
 
-                    if ident == "unaligned" {
-                        buffer_offset = Some(BufferOffset::Unaligned);
+                    if ident == "unknown" {
+                        buffer_offset = Some(BufferOffset::Unknown);
                     } else {
                         return Err(syn::Error::new_spanned(
                             ident,
-                            "buffer_offset must be an integer in 0..=7 or `unaligned`",
+                            "buffer_offset must be an integer in 0..=7 or `unknown`",
                         ));
                     }
                 }
                 other => {
                     return Err(syn::Error::new_spanned(
                         other,
-                        "buffer_offset must be an integer in 0..=7 or `unaligned`",
+                        "buffer_offset must be an integer in 0..=7 or `unknown`",
                     ));
                 }
             },
             _ => {
                 return Err(syn::Error::new_spanned(
                     meta,
-                    "fixed_offset_layout only supports `buffer_offset = 0..=7` and `buffer_offset = unaligned`",
+                    "fixed_offset_layout only supports `buffer_offset = 0..=7` and `buffer_offset = unknown`",
                 ))
             }
         }
@@ -1635,7 +1635,7 @@ fn parse_args(attr: &str) -> syn::Result<LayoutArgs> {
     let Some(buffer_offset) = buffer_offset else {
         return Err(syn::Error::new(
             Span::call_site(),
-            "fixed_offset_layout requires `buffer_offset = 0..=7` or `buffer_offset = unaligned`",
+            "fixed_offset_layout requires `buffer_offset = 0..=7` or `buffer_offset = unknown`",
         ));
     };
 
@@ -1938,23 +1938,21 @@ mod tests {
     }
 
     #[test]
-    fn fixed_offset_layout_rejects_unaligned_borrowed_field() {
+    fn fixed_offset_layout_rejects_unknown_borrowed_field() {
         let item: syn::ItemStruct = parse_quote! {
             struct Args {
                 payload: [u64; 2],
             }
         };
 
-        let error = expand_fixed_offset_layout("buffer_offset = unaligned", &item)
+        let error = expand_fixed_offset_layout("buffer_offset = unknown", &item)
             .unwrap_err()
             .to_string();
-        assert!(
-            error.contains("field `payload` cannot be borrowed with `buffer_offset = unaligned`")
-        );
+        assert!(error.contains("field `payload` cannot be borrowed with `buffer_offset = unknown`"));
     }
 
     #[test]
-    fn fixed_offset_layout_accepts_unaligned_copy_only_fields() {
+    fn fixed_offset_layout_accepts_unknown_copy_only_fields() {
         let item: syn::ItemStruct = parse_quote! {
             struct Args {
                 amount: u64,
@@ -1962,7 +1960,7 @@ mod tests {
             }
         };
 
-        expand_fixed_offset_layout("buffer_offset = unaligned", &item).unwrap();
+        expand_fixed_offset_layout("buffer_offset = unknown", &item).unwrap();
     }
 
     #[test]
@@ -2111,7 +2109,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains(
-            "fixed_offset_layout requires `buffer_offset = 0..=7` or `buffer_offset = unaligned`"
+            "fixed_offset_layout requires `buffer_offset = 0..=7` or `buffer_offset = unknown`"
         ));
     }
 
@@ -2130,6 +2128,20 @@ mod tests {
     }
 
     #[test]
+    fn fixed_offset_layout_rejects_dynamic_buffer_offset_identifier() {
+        let item: syn::ItemStruct = parse_quote! {
+            struct Args {
+                value: u16,
+            }
+        };
+
+        let error = expand_fixed_offset_layout("buffer_offset = dynamic", &item)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("buffer_offset must be an integer in 0..=7 or `unknown`"));
+    }
+
+    #[test]
     fn fixed_offset_layout_rejects_unknown_parameters() {
         let item: syn::ItemStruct = parse_quote! {
             struct Args {
@@ -2141,7 +2153,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains(
-            "fixed_offset_layout only supports `buffer_offset = 0..=7` and `buffer_offset = unaligned`"
+            "fixed_offset_layout only supports `buffer_offset = 0..=7` and `buffer_offset = unknown`"
         ));
     }
 }
