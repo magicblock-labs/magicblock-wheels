@@ -3,7 +3,10 @@ use core::marker::PhantomData;
 use bytemuck::Pod;
 use pinocchio::error::ProgramError;
 
-use super::{Encodable, FixedLayoutElement, FixedSizeLayout, FixedValueElement, LayoutStorageMut};
+use super::{
+    Encodable, FixedLayoutElement, FixedSizeLayout, FixedValueElement, LayoutStorageMut,
+    MAX_SUPPORTED_VEC_LEN,
+};
 use crate::DataLayoutError;
 
 /// Mutable storage-backed view over a fixed-capacity `Vec<T>` slot.
@@ -331,6 +334,6 @@ fn max_len(len_width: usize) -> usize {
     match len_width {
         0 => 0,
         1..=7 => (1usize << (len_width * 8)) - 1,
-        _ => usize::MAX,
+        _ => MAX_SUPPORTED_VEC_LEN,
     }
 }

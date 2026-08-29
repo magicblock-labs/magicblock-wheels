@@ -203,6 +203,13 @@ struct FixedTrailingVecArgs {
     tail: Vec<u8>,
 }
 
+#[fixed_offset_layout(buffer_offset = 0)]
+struct FixedTrailingWideVecArgs {
+    tag: u8,
+    #[flexible = 8]
+    payload: Vec<u8>,
+}
+
 #[test]
 fn fixed_offset_layout_supports_trailing_flexible_vec() {
     assert_eq!(FixedTrailingVecArgs::MIN_DATA_LEN, 7);
@@ -253,6 +260,32 @@ fn fixed_offset_layout_supports_trailing_flexible_vec() {
     assert_eq!(tail.as_slice(), &[]);
     assert_eq!(tail.len(), 0);
     assert_eq!(tail.capacity(), 0);
+}
+
+#[test]
+fn fixed_offset_layout_supports_eight_byte_trailing_flexible_vec_len_width() {
+    const PAYLOAD_LEN: usize = 0x1_0000;
+
+    assert_eq!(FixedTrailingWideVecArgs::MIN_DATA_LEN, 1);
+    assert_eq!(
+        FixedTrailingWideVecArgs::MAX_DATA_LEN,
+        1 + 8 + u32::MAX as usize
+    );
+    assert_eq!(FixedTrailingWideVecArgs::OFFSETS, [0, 1]);
+
+    let payload = (0..PAYLOAD_LEN).map(|value| value as u8).collect();
+    let value = FixedTrailingWideVecArgs { tag: 7, payload };
+    let encoded = value.encode().unwrap();
+
+    assert_eq!(encoded.len(), 1 + 8 + PAYLOAD_LEN);
+    assert_eq!(encoded[0], 7);
+    assert_eq!(&encoded[1..9], &(PAYLOAD_LEN as u64).to_le_bytes()[..]);
+
+    let view = FixedTrailingWideVecArgs::decode(&encoded).unwrap();
+    assert_eq!(view.tag(), 7);
+    assert_eq!(view.payload().len(), PAYLOAD_LEN);
+    assert_eq!(view.payload().capacity(), PAYLOAD_LEN);
+    assert_eq!(view.payload().active_bytes(), &value.payload[..]);
 }
 
 #[test]

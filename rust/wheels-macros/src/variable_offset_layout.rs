@@ -6,6 +6,7 @@ use std::{
 use crate::common::{
     ensure_allow_dead_code, impl_where_clause, is_bool, is_string, option_inner, parse_value_kind,
     read_copy_expr, strip_field_attr, usize_lit, vec_inner, AccessMode, FixedValueKind,
+    MAX_SUPPORTED_VEC_LEN,
 };
 use proc_macro2::Span;
 use quote::{format_ident, quote};
@@ -2119,7 +2120,7 @@ struct Flexible {
 impl Flexible {
     fn capacity(self) -> usize {
         match self.len_width {
-            8 => u32::MAX as usize,
+            8 => MAX_SUPPORTED_VEC_LEN,
             _ => (1usize << (self.len_width * 8)) - 1,
         }
     }

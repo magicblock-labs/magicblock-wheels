@@ -1,6 +1,7 @@
 use crate::common::{
     ensure_allow_dead_code, impl_where_clause, is_bool, is_string, option_inner, parse_value_kind,
     read_copy_expr, strip_field_attr, usize_lit, vec_inner, AccessMode, FixedValueKind,
+    MAX_SUPPORTED_VEC_LEN,
 };
 use proc_macro2::Span;
 use quote::{format_ident, quote};
@@ -15,8 +16,7 @@ const UNSUPPORTED_FIELD_MESSAGE: &str =
     "fixed_offset_layout fields must be bool, Pubkey, integer primitives, or fixed-size arrays";
 const INTEGER_FIELD_MESSAGE: &str = "field must be an integer primitive";
 
-// [capacity = flexible] array-len is always encoded as 2-bytes
-const MAX_LEN_WIDTH: usize = 2;
+const MAX_LEN_WIDTH: usize = 8;
 
 const MAX_CAPACITY: usize = 0xffff;
 
@@ -178,7 +178,7 @@ pub(crate) fn expand_fixed_offset_layout(
                         elem_size,
                         ..
                     } => {
-                        let max_capacity = usize_lit(2usize.pow(*len_width as u32 * 8) - 1);
+                        let max_capacity = usize_lit(max_len_for_width(*len_width));
                         let len_width = usize_lit(*len_width);
                         quote! {
                             let field_len = self.#trailing_flexible_field.len();
@@ -415,16 +415,11 @@ pub(crate) fn expand_fixed_offset_layout(
             }
 
             fn __read_vec_len(bytes: &[u8], offset: usize, len_width: usize) -> usize {
-                match len_width {
-                    1 => bytes[offset] as usize,
-                    2 => {
-                        let raw: [u8; 2] = bytes[offset..offset + 2].try_into().expect("validated len");
-                        u16::from_le_bytes(raw) as usize
-                    },
-                    _ => {
-                        unreachable!()
-                    }
-                }
+                let mut raw = [0u8; 8];
+                raw[..len_width].copy_from_slice(&bytes[offset..offset + len_width]);
+                let raw_len = u64::from_le_bytes(raw);
+                <usize as core::convert::TryFrom<u64>>::try_from(raw_len)
+                    .expect("validated len header")
             }
 
             fn __validate_vec_len(
@@ -653,7 +648,7 @@ impl ComptimeOptionalLen {
             } => {
                 let len_width_value = *len_width;
                 let len_width = usize_lit(len_width_value);
-                let max_capacity = usize_lit(2usize.pow(len_width_value as u32 * 8) - 1);
+                let max_capacity = usize_lit(max_len_for_width(len_width_value));
                 quote!(#len_width + #max_capacity * #elem_size)
             }
             ComptimeOptionalLen::Option { value_size } => {
@@ -1045,7 +1040,6 @@ impl FixedFieldKind {
             }
             Self::Vec { elem, capacity } => {
                 let elem_size = elem.size_expr();
-                let len_width_ty = capacity.len_width_ty();
                 let len_width = capacity.len_width_lit();
                 if let Some(cap) = capacity.comptime_capacity_lit() {
                     match elem {
@@ -1056,7 +1050,8 @@ impl FixedFieldKind {
                                 return Err(::wheels::DataLayoutError::LengthExceedsCapacity);
                             }
 
-                            bytes[#offset..#offset + #len_width].copy_from_slice(::bytemuck::bytes_of(&(self.#field_ident.len() as #len_width_ty)));
+                            let len_header = (self.#field_ident.len() as u64).to_le_bytes();
+                            bytes[#offset..#offset + #len_width].copy_from_slice(&len_header[..#len_width]);
                             bytes[#offset + #len_width..#offset + #len_width + self.#field_ident.len() * #elem_size].copy_from_slice(::bytemuck::cast_slice(&self.#field_ident.as_slice()));
                             if self.#field_ident.len() < #cap {
                                  bytes[#offset + #len_width + self.#field_ident.len() * #elem_size..#offset + #len_width + #cap * #elem_size].fill(0);
@@ -1069,7 +1064,8 @@ impl FixedFieldKind {
                                 return Err(::wheels::DataLayoutError::LengthExceedsCapacity);
                             }
 
-                            bytes[#offset..#offset + #len_width].copy_from_slice(::bytemuck::bytes_of(&(self.#field_ident.len() as #len_width_ty)));
+                            let len_header = (self.#field_ident.len() as u64).to_le_bytes();
+                            bytes[#offset..#offset + #len_width].copy_from_slice(&len_header[..#len_width]);
                             let start = #offset + #len_width;
                             let active_end = start + self.#field_ident.len() * #elem_size;
                             for (index, value) in self.#field_ident.iter().enumerate() {
@@ -1098,7 +1094,8 @@ impl FixedFieldKind {
                             if self.#field_ident.len() > #max_capacity {
                                 return Err(::wheels::DataLayoutError::LengthExceedsCapacity);
                             } else if !self.#field_ident.is_empty() {
-                                bytes[#offset..#offset + #len_width].copy_from_slice(::bytemuck::bytes_of(&(self.#field_ident.len() as #len_width_ty)));
+                                let len_header = (self.#field_ident.len() as u64).to_le_bytes();
+                                bytes[#offset..#offset + #len_width].copy_from_slice(&len_header[..#len_width]);
                                 bytes[#offset + #len_width..#offset + #len_width + self.#field_ident.len() * #elem_size].copy_from_slice(::bytemuck::cast_slice(&self.#field_ident.as_slice()));
                             } else {
                                 // Empty flexible Vec omits the length header and payload.
@@ -1110,7 +1107,8 @@ impl FixedFieldKind {
                             if self.#field_ident.len() > #max_capacity {
                                 return Err(::wheels::DataLayoutError::LengthExceedsCapacity);
                             } else if !self.#field_ident.is_empty() {
-                                bytes[#offset..#offset + #len_width].copy_from_slice(::bytemuck::bytes_of(&(self.#field_ident.len() as #len_width_ty)));
+                                let len_header = (self.#field_ident.len() as u64).to_le_bytes();
+                                bytes[#offset..#offset + #len_width].copy_from_slice(&len_header[..#len_width]);
                                 let start = #offset + #len_width;
                                 for (index, value) in self.#field_ident.iter().enumerate() {
                                     let element_start = start + index * #elem_size;
@@ -1664,7 +1662,7 @@ impl Capacity {
     fn max_capacity(self) -> usize {
         match self {
             Capacity::Fixed { capacity } => capacity,
-            Capacity::Flexible { len_width } => 2usize.pow(len_width as u32 * 8) - 1,
+            Capacity::Flexible { len_width } => max_len_for_width(len_width),
         }
     }
 
@@ -1688,13 +1686,12 @@ impl Capacity {
     fn len_width_lit(&self) -> LitInt {
         usize_lit(self.len_width())
     }
+}
 
-    fn len_width_ty(&self) -> proc_macro2::TokenStream {
-        match self.len_width() {
-            1 => quote!(u8),
-            2 => quote!(u16),
-            _ => unreachable!(),
-        }
+fn max_len_for_width(len_width: usize) -> usize {
+    match len_width {
+        8 => MAX_SUPPORTED_VEC_LEN,
+        _ => (1usize << (len_width * 8)) - 1,
     }
 }
 
@@ -1705,9 +1702,9 @@ enum FieldAttribute {
     ///
     /// forms:
     ///
-    ///   #[flexible = 1|2]
+    ///   #[flexible = 1..=8]
     ///     applicable on Vec only
-    ///     Some(usize) represents it's a Vec and its length is encoded as len_width  bytes
+    ///     Some(usize) represents it's a Vec and its length is encoded as len_width bytes
     ///
     ///   #[flexible]
     ///     applicable on Option only
@@ -1745,7 +1742,7 @@ fn parse_field_attr(
             if cap > MAX_CAPACITY {
                 return Err(syn::Error::new(
                     field.span(),
-                    "capacity above 0xFFFF is not supported (because len_width <= 2)",
+                    "capacity above 0xFFFF is not supported for fixed-capacity Vec fields",
                 ));
             }
 
@@ -1754,7 +1751,7 @@ fn parse_field_attr(
             if !is_last_field {
                 return Err(syn::Error::new_spanned(
                         field,
-                        "#[flexible] or #[flexible = 1|2] is applicable on the last field only if it is an Option or a Vec type",
+                        "#[flexible] or #[flexible = 1..=8] is applicable on the last field only if it is an Option or a Vec type",
                     ));
             }
             match &attr.meta {
@@ -1766,7 +1763,7 @@ fn parse_field_attr(
                     else {
                         return Err(syn::Error::new_spanned(
                             attr,
-                            "flexible must use the form `#[flexible = 1|2]` (on Vec field) or #[flexible] (on Option field)",
+                            "flexible must use the form `#[flexible = 1..=8]` (on Vec field) or #[flexible] (on Option field)",
                         ));
                     };
 
@@ -1775,7 +1772,7 @@ fn parse_field_attr(
                     if !(1..=MAX_LEN_WIDTH).contains(&len_width) {
                         return Err(syn::Error::new(
                             field.span(),
-                            "flexible must be either 1 or 2",
+                            "flexible must be in the range 1..=8",
                         ));
                     }
                     attributes.push(FieldAttribute::Flexible(Some(len_width)));
@@ -1786,7 +1783,7 @@ fn parse_field_attr(
                 _meta => {
                     return Err(syn::Error::new_spanned(
                         attr,
-                        "flexible must use the form `#[flexible = 1|2]` (on Vec field) or #[flexible] (on Option field)",
+                        "flexible must use the form `#[flexible = 1..=8]` (on Vec field) or #[flexible] (on Option field)",
                     ));
                 }
             };
@@ -1887,21 +1884,13 @@ fn borrow_ref_expr(ty: &Type, bytes_expr: proc_macro2::TokenStream) -> proc_macr
 }
 
 fn read_len_expr(offset: proc_macro2::TokenStream, len_width: usize) -> proc_macro2::TokenStream {
-    match len_width {
-        1 => quote!(self.bytes[#offset] as usize),
-        2 => quote!({
-            let raw: [u8; 2] = self.bytes[#offset..#offset + 2].try_into().expect("validated len");
-            u16::from_le_bytes(raw) as usize
-        }),
-        3 => quote!({
-            let mut raw = [0u8; 4];
-            raw[0..3].copy_from_slice(&self.bytes[#offset..#offset + 3]);
-            u32::from_le_bytes(raw) as usize
-        }),
-        _ => {
-            unreachable!()
-        }
-    }
+    let len_width = usize_lit(len_width);
+    quote!({
+        let mut raw = [0u8; 8];
+        raw[..#len_width].copy_from_slice(&self.bytes[#offset..#offset + #len_width]);
+        let raw_len = u64::from_le_bytes(raw);
+        <usize as core::convert::TryFrom<u64>>::try_from(raw_len).expect("validated len header")
+    })
 }
 
 #[cfg(test)]
@@ -1961,6 +1950,35 @@ mod tests {
         };
 
         expand_fixed_offset_layout("buffer_offset = unknown", &item).unwrap();
+    }
+
+    #[test]
+    fn fixed_offset_layout_accepts_flexible_len_width_eight() {
+        let item: syn::ItemStruct = parse_quote! {
+            struct Args {
+                value: u16,
+                #[flexible = 8]
+                values: Vec<u8>,
+            }
+        };
+
+        expand_fixed_offset_layout("buffer_offset = 0", &item).unwrap();
+    }
+
+    #[test]
+    fn fixed_offset_layout_rejects_invalid_flexible_len_width() {
+        let item: syn::ItemStruct = parse_quote! {
+            struct Args {
+                value: u16,
+                #[flexible = 9]
+                values: Vec<u8>,
+            }
+        };
+
+        let error = expand_fixed_offset_layout("buffer_offset = 0", &item)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("flexible must be in the range 1..=8"));
     }
 
     #[test]
