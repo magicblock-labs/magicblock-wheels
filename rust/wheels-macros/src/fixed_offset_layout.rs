@@ -10,7 +10,7 @@ use syn::{
     ItemStruct, Lit, LitInt, Meta, Token, Type,
 };
 
-const FIELD_ATTRIBUTES: &[&str] = &["capacity", "flexible"];
+const FIELD_ATTRIBUTES: &[&str] = &["capacity", "extendable", "flexible"];
 const LAYOUT_NAME: &str = "fixed_offset_layout";
 const UNSUPPORTED_FIELD_MESSAGE: &str =
     "fixed_offset_layout fields must be bool, Pubkey, integer primitives, or fixed-size arrays";
@@ -74,7 +74,7 @@ pub(crate) fn expand_fixed_offset_layout(
 
     let mut validate_steps = Vec::new();
     let mut layout_error: Option<syn::Error> = None;
-    let mut trailing_flexible_field = None;
+    let mut trailing_variable_field = None;
     let field_count = fields.named.len();
     for (index, field) in fields.named.iter_mut().enumerate() {
         let field_ident = field.ident.as_ref().expect("named field");
@@ -143,7 +143,7 @@ pub(crate) fn expand_fixed_offset_layout(
                 // The last offset becomes datalen which in this case is MIN_DATA_LEN.
                 offsets.push(offset_expr.clone());
 
-                trailing_flexible_field = Some((field_ident, len_width));
+                trailing_variable_field = Some((field_ident, len_width));
             }
         }
     }
@@ -167,10 +167,10 @@ pub(crate) fn expand_fixed_offset_layout(
         .unwrap_or_else(|| {
             "Sum of encodable-sizes is computed from nested fixed-size layouts.".to_string()
         });
-    let has_trailing_flexible_field = trailing_flexible_field.is_some();
+    let has_trailing_variable_field = trailing_variable_field.is_some();
     let (datalen_vars, datalen_check, check_log_expr, encoded_len_expr) =
-        match trailing_flexible_field {
-            Some((trailing_flexible_field, comptime_optlen)) => {
+        match trailing_variable_field {
+            Some((trailing_variable_field, comptime_optlen)) => {
                 let max_datalen = comptime_optlen.max_datalen_expr();
                 let encoded_len_expr = match &comptime_optlen {
                     ComptimeOptionalLen::ArrayLen {
@@ -181,11 +181,11 @@ pub(crate) fn expand_fixed_offset_layout(
                         let max_capacity = usize_lit(max_len_for_width(*len_width));
                         let len_width = usize_lit(*len_width);
                         quote! {
-                            let field_len = self.#trailing_flexible_field.len();
+                            let field_len = self.#trailing_variable_field.len();
                             if field_len > #max_capacity {
                                 ::pinocchio_log::log!(
                                     "Cannot encode field {}: len {} exceeds max {}",
-                                    stringify!(#trailing_flexible_field),
+                                    stringify!(#trailing_variable_field),
                                     field_len,
                                     #max_capacity,
                                 );
@@ -202,7 +202,7 @@ pub(crate) fn expand_fixed_offset_layout(
                     ComptimeOptionalLen::Option { value_size } => {
                         let value_size = usize_lit(*value_size);
                         quote! {
-                            Ok(Self::MIN_DATA_LEN + self.#trailing_flexible_field.as_ref().map(|_| 1 + #value_size).unwrap_or(0))
+                            Ok(Self::MIN_DATA_LEN + self.#trailing_variable_field.as_ref().map(|_| 1 + #value_size).unwrap_or(0))
                         }
                     }
                 };
@@ -238,7 +238,7 @@ pub(crate) fn expand_fixed_offset_layout(
                 quote!(Ok(#struct_name::DATA_LEN)),
             ),
         };
-    let decode_trait_impls = if has_trailing_flexible_field {
+    let decode_trait_impls = if has_trailing_variable_field {
         quote! {
             impl ::wheels::layout::Decodable for #struct_name {
                 type View<'a> = #view_name<'a>;
@@ -280,7 +280,7 @@ pub(crate) fn expand_fixed_offset_layout(
             }
         }
     };
-    let layout_bounds_impl = if has_trailing_flexible_field {
+    let layout_bounds_impl = if has_trailing_variable_field {
         quote! {
             impl ::wheels::layout::LayoutBounds for #struct_name {
                 const MIN_DATA_LEN: usize = #struct_name::MIN_DATA_LEN;
@@ -437,7 +437,7 @@ pub(crate) fn expand_fixed_offset_layout(
                 Ok(())
             }
 
-            fn __validate_flexible_vec_len(
+            fn __validate_extendable_vec_len(
                 bytes: &[u8],
                 offset: usize,
                 capacity: usize,
@@ -463,7 +463,7 @@ pub(crate) fn expand_fixed_offset_layout(
                 let capacity_bytes = bytes.len() - offset - len_width;
                 if capacity_bytes % elem_size != 0 {
                     ::pinocchio_log::log!(
-                        "Invalid flexible Vec storage for field {}::{} : payload capacity bytes {} are not a multiple of element size {}",
+                        "Invalid extendable Vec storage for field {}::{} : payload capacity bytes {} are not a multiple of element size {}",
                         stringify!(#struct_name),
                         field_name,
                         capacity_bytes,
@@ -600,14 +600,14 @@ impl FixedVecElementKind {
         }
     }
 
-    fn flexible_marker(&self) -> proc_macro2::TokenStream {
+    fn extendable_marker(&self) -> proc_macro2::TokenStream {
         match self {
             Self::FixedValue(_) => quote!(::wheels::layout::FixedValueElement),
             Self::FixedSizeLayout { .. } => quote!(::wheels::layout::FixedLayoutElement),
         }
     }
 
-    fn flexible_new_storage_fn(&self) -> Ident {
+    fn extendable_new_storage_fn(&self) -> Ident {
         match self {
             Self::FixedValue(_) => format_ident!("new_fixed_value_storage"),
             Self::FixedSizeLayout { .. } => format_ident!("new_fixed_layout_storage"),
@@ -952,10 +952,10 @@ impl FixedFieldKind {
                             #active_layout_validation
                         }
                     }
-                    Capacity::Flexible { .. } => {
+                    Capacity::Extendable { .. } => {
                         let capacity_lit = capacity.max_capacity_lit();
                         quote! {
-                            Self::__validate_flexible_vec_len(bytes, #offset_expr, #capacity_lit, #len_width_lit, #elem_size, #field_name)?;
+                            Self::__validate_extendable_vec_len(bytes, #offset_expr, #capacity_lit, #len_width_lit, #elem_size, #field_name)?;
                             if bytes.len() != #offset_expr {
                                 #alignment_check
                                 #active_layout_validation
@@ -1085,7 +1085,7 @@ impl FixedFieldKind {
                         },
                     }
                 } else {
-                    // it must be the last field of Vec type with #[capacity = flexible]
+                    // It must be the last Vec field with #[extendable = N].
                     let max_capacity = capacity.max_capacity_lit();
                     match elem {
                         FixedVecElementKind::FixedValue(_) => quote! {
@@ -1098,7 +1098,7 @@ impl FixedFieldKind {
                                 bytes[#offset..#offset + #len_width].copy_from_slice(&len_header[..#len_width]);
                                 bytes[#offset + #len_width..#offset + #len_width + self.#field_ident.len() * #elem_size].copy_from_slice(::bytemuck::cast_slice(&self.#field_ident.as_slice()));
                             } else {
-                                // Empty flexible Vec omits the length header and payload.
+                                // Empty extendable Vec omits the length header and payload.
                             }
                         },
                         FixedVecElementKind::FixedSizeLayout { .. } => quote! {
@@ -1122,7 +1122,7 @@ impl FixedFieldKind {
                                     }
                                 }
                             } else {
-                                // Empty flexible Vec omits the length header and payload.
+                                // Empty extendable Vec omits the length header and payload.
                             }
                         },
                     }
@@ -1235,37 +1235,37 @@ impl FixedFieldKind {
                         FixedVecElementKind::FixedValue(_) => Ok(quote! {
                             pub fn #field_ident(
                                 &self,
-                            ) -> ::wheels::layout::FlexibleVec<
+                            ) -> ::wheels::layout::ExtendableVec<
                                 'a,
                                 #elem_ty,
                                 (),
                                 ::wheels::layout::FixedValueElement,
                             > {
-                                ::wheels::layout::FlexibleVec::new_fixed_value(
+                                ::wheels::layout::ExtendableVec::new_fixed_value(
                                     self.bytes,
                                     #offset,
                                     #len_width_lit,
                                     #elem_size,
                                 )
-                                .expect("validated flexible Vec")
+                                .expect("validated extendable Vec")
                             }
                         }),
                         FixedVecElementKind::FixedSizeLayout { .. } => Ok(quote! {
                             pub fn #field_ident(
                                 &self,
-                            ) -> ::wheels::layout::FlexibleVec<
+                            ) -> ::wheels::layout::ExtendableVec<
                                 'a,
                                 #elem_ty,
                                 (),
                                 ::wheels::layout::FixedLayoutElement,
                             > {
-                                ::wheels::layout::FlexibleVec::new_fixed_layout(
+                                ::wheels::layout::ExtendableVec::new_fixed_layout(
                                     self.bytes,
                                     #offset,
                                     #len_width_lit,
                                     #elem_size,
                                 )
-                                .expect("validated flexible Vec")
+                                .expect("validated extendable Vec")
                             }
                         }),
                     }
@@ -1400,7 +1400,7 @@ impl FixedFieldKind {
             Self::Vec { elem, capacity } => {
                 let elem_ty = elem.ty();
                 let elem_size = elem.size_expr();
-                let marker = elem.flexible_marker();
+                let marker = elem.extendable_marker();
                 let len_width_lit = capacity.len_width_lit();
 
                 match capacity {
@@ -1424,16 +1424,16 @@ impl FixedFieldKind {
                             }
                         })
                     }
-                    Capacity::Flexible { .. } => {
-                        let new_storage_fn = elem.flexible_new_storage_fn();
+                    Capacity::Extendable { .. } => {
+                        let new_storage_fn = elem.extendable_new_storage_fn();
                         Ok(quote! {
                             pub fn #field_mut_ident(
                                 &mut self,
                             ) -> core::result::Result<
-                                ::wheels::layout::FlexibleVec<'a, #elem_ty, S, #marker>,
+                                ::wheels::layout::ExtendableVec<'a, #elem_ty, S, #marker>,
                                 ::pinocchio::error::ProgramError,
                             > {
-                                ::wheels::layout::FlexibleVec::#new_storage_fn(
+                                ::wheels::layout::ExtendableVec::#new_storage_fn(
                                     self.storage,
                                     #offset,
                                     #len_width_lit,
@@ -1462,16 +1462,16 @@ fn parse_field_layout(field: &syn::Field, is_last_field: bool) -> syn::Result<Fi
         let attribute = attribute.ok_or_else(|| {
             syn::Error::new_spanned(
                 field,
-                "Vec fields in fixed_offset_layout require `#[capacity = N]`",
+                "Vec fields in fixed_offset_layout require `#[capacity = N]` or `#[extendable = N]`",
             )
         })?;
         let capacity = match attribute {
             FieldAttribute::Capacity(capacity) => Capacity::Fixed { capacity },
-            FieldAttribute::Flexible(Some(len_width)) => Capacity::Flexible { len_width },
-            FieldAttribute::Flexible(None) => {
+            FieldAttribute::Extendable(len_width) => Capacity::Extendable { len_width },
+            FieldAttribute::FlexibleOption => {
                 return Err(syn::Error::new_spanned(
                     field,
-                    "Vec fields in fixed_offset_layout require `#[capacity = N]`",
+                    "Vec fields in fixed_offset_layout require `#[capacity = N]` or `#[extendable = N]`",
                 ))
             }
         };
@@ -1499,11 +1499,11 @@ fn parse_field_layout(field: &syn::Field, is_last_field: bool) -> syn::Result<Fi
     if let Some(inner) = option_inner(ty) {
         let optional = attribute
             .map(|attribute| match attribute {
-                FieldAttribute::Flexible(None) => Ok(Optional::Flexible),
-                FieldAttribute::Capacity(_) | FieldAttribute::Flexible(Some(_)) => {
+                FieldAttribute::FlexibleOption => Ok(Optional::Flexible),
+                FieldAttribute::Capacity(_) | FieldAttribute::Extendable(_) => {
                     Err(syn::Error::new_spanned(
                         field,
-                        "#[flexible = N] cannot be applied on Option fields",
+                        "#[extendable = N] cannot be applied on Option fields",
                     ))
                 }
             })
@@ -1644,14 +1644,14 @@ fn parse_args(attr: &str) -> syn::Result<LayoutArgs> {
 enum Capacity {
     Fixed { capacity: usize },
 
-    Flexible { len_width: usize },
+    Extendable { len_width: usize },
 }
 
 impl Capacity {
     fn comptime_capacity(self) -> Option<usize> {
         match self {
             Capacity::Fixed { capacity } => Some(capacity),
-            Capacity::Flexible { len_width: _ } => None,
+            Capacity::Extendable { len_width: _ } => None,
         }
     }
 
@@ -1662,7 +1662,7 @@ impl Capacity {
     fn max_capacity(self) -> usize {
         match self {
             Capacity::Fixed { capacity } => capacity,
-            Capacity::Flexible { len_width } => max_len_for_width(len_width),
+            Capacity::Extendable { len_width } => max_len_for_width(len_width),
         }
     }
 
@@ -1679,7 +1679,7 @@ impl Capacity {
                     2
                 }
             }
-            Capacity::Flexible { len_width } => len_width,
+            Capacity::Extendable { len_width } => len_width,
         }
     }
 
@@ -1699,18 +1699,11 @@ enum FieldAttribute {
     /// #[capacity = N]
     Capacity(usize),
 
-    ///
-    /// forms:
-    ///
-    ///   #[flexible = 1..=8]
-    ///     applicable on Vec only
-    ///     Some(usize) represents it's a Vec and its length is encoded as len_width bytes
-    ///
-    ///   #[flexible]
-    ///     applicable on Option only
-    ///     None represents that is an Option
-    ///
-    Flexible(Option<usize>),
+    /// #[extendable = 1..=8]
+    Extendable(usize),
+
+    /// #[flexible]
+    FlexibleOption,
 }
 
 fn parse_field_attr(
@@ -1747,46 +1740,54 @@ fn parse_field_attr(
             }
 
             attributes.push(FieldAttribute::Capacity(cap));
+        } else if attr.path().is_ident("extendable") {
+            if !is_last_field {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    "#[extendable = 1..=8] is applicable only on the last field when it is a Vec type",
+                ));
+            }
+
+            let syn::Meta::NameValue(meta) = &attr.meta else {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "extendable must use the form `#[extendable = 1..=8]`",
+                ));
+            };
+            let Expr::Lit(ExprLit {
+                lit: Lit::Int(lit_int),
+                ..
+            }) = &meta.value
+            else {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "extendable must use the form `#[extendable = 1..=8]`",
+                ));
+            };
+
+            let len_width: usize = lit_int.base10_parse()?;
+
+            if !(1..=MAX_LEN_WIDTH).contains(&len_width) {
+                return Err(syn::Error::new(
+                    field.span(),
+                    "extendable must be in the range 1..=8",
+                ));
+            }
+            attributes.push(FieldAttribute::Extendable(len_width));
         } else if attr.path().is_ident("flexible") {
             if !is_last_field {
                 return Err(syn::Error::new_spanned(
-                        field,
-                        "#[flexible] or #[flexible = 1..=8] is applicable on the last field only if it is an Option or a Vec type",
-                    ));
+                    field,
+                    "#[flexible] is applicable only on the last field when it is an Option type",
+                ));
             }
-            match &attr.meta {
-                syn::Meta::NameValue(meta) => {
-                    let Expr::Lit(ExprLit {
-                        lit: Lit::Int(lit_int),
-                        ..
-                    }) = &meta.value
-                    else {
-                        return Err(syn::Error::new_spanned(
-                            attr,
-                            "flexible must use the form `#[flexible = 1..=8]` (on Vec field) or #[flexible] (on Option field)",
-                        ));
-                    };
-
-                    let len_width: usize = lit_int.base10_parse()?;
-
-                    if !(1..=MAX_LEN_WIDTH).contains(&len_width) {
-                        return Err(syn::Error::new(
-                            field.span(),
-                            "flexible must be in the range 1..=8",
-                        ));
-                    }
-                    attributes.push(FieldAttribute::Flexible(Some(len_width)));
-                }
-                syn::Meta::Path(_) => {
-                    attributes.push(FieldAttribute::Flexible(None));
-                }
-                _meta => {
-                    return Err(syn::Error::new_spanned(
-                        attr,
-                        "flexible must use the form `#[flexible = 1..=8]` (on Vec field) or #[flexible] (on Option field)",
-                    ));
-                }
-            };
+            if !matches!(&attr.meta, syn::Meta::Path(_)) {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "`#[flexible = N]` is not supported by fixed_offset_layout; use `#[flexible]` for a final Option field or `#[extendable = N]` for a final extendable Vec field",
+                ));
+            }
+            attributes.push(FieldAttribute::FlexibleOption);
         }
     }
 
@@ -1953,11 +1954,11 @@ mod tests {
     }
 
     #[test]
-    fn fixed_offset_layout_accepts_flexible_len_width_eight() {
+    fn fixed_offset_layout_accepts_extendable_len_width_eight() {
         let item: syn::ItemStruct = parse_quote! {
             struct Args {
                 value: u16,
-                #[flexible = 8]
+                #[extendable = 8]
                 values: Vec<u8>,
             }
         };
@@ -1966,11 +1967,11 @@ mod tests {
     }
 
     #[test]
-    fn fixed_offset_layout_rejects_invalid_flexible_len_width() {
+    fn fixed_offset_layout_rejects_invalid_extendable_len_width() {
         let item: syn::ItemStruct = parse_quote! {
             struct Args {
                 value: u16,
-                #[flexible = 9]
+                #[extendable = 9]
                 values: Vec<u8>,
             }
         };
@@ -1978,7 +1979,23 @@ mod tests {
         let error = expand_fixed_offset_layout("buffer_offset = 0", &item)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("flexible must be in the range 1..=8"));
+        assert!(error.contains("extendable must be in the range 1..=8"));
+    }
+
+    #[test]
+    fn fixed_offset_layout_rejects_flexible_len_width_for_vec() {
+        let item: syn::ItemStruct = parse_quote! {
+            struct Args {
+                value: u16,
+                #[flexible = 1]
+                values: Vec<u8>,
+            }
+        };
+
+        let error = expand_fixed_offset_layout("buffer_offset = 0", &item)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("`#[extendable = N]`"));
     }
 
     #[test]
@@ -2063,7 +2080,9 @@ mod tests {
         let error = expand_fixed_offset_layout("buffer_offset = 0", &item)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("Vec fields in fixed_offset_layout require `#[capacity = N]`"));
+        assert!(error.contains(
+            "Vec fields in fixed_offset_layout require `#[capacity = N]` or `#[extendable = N]`"
+        ));
     }
 
     #[test]

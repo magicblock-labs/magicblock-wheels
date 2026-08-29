@@ -199,33 +199,33 @@ struct FixedTrailingVecArgs {
     header: u16,
     #[capacity = 4]
     reserved: Vec<u8>,
-    #[flexible = 2]
+    #[extendable = 2]
     tail: Vec<u8>,
 }
 
 #[fixed_offset_layout(buffer_offset = 0)]
 struct FixedTrailingByteVecArgs {
     tag: u8,
-    #[flexible = 1]
+    #[extendable = 1]
     payload: Vec<u8>,
 }
 
 #[fixed_offset_layout(buffer_offset = 0)]
 struct FixedTrailingU16VecArgs {
     tag: u8,
-    #[flexible = 1]
+    #[extendable = 1]
     values: Vec<u16>,
 }
 
 #[fixed_offset_layout(buffer_offset = 0)]
 struct FixedTrailingWideVecArgs {
     tag: u8,
-    #[flexible = 8]
+    #[extendable = 8]
     payload: Vec<u8>,
 }
 
 #[test]
-fn fixed_offset_layout_supports_trailing_flexible_vec() {
+fn fixed_offset_layout_supports_trailing_extendable_vec() {
     assert_eq!(FixedTrailingVecArgs::MIN_DATA_LEN, 7);
     assert_eq!(FixedTrailingVecArgs::MAX_DATA_LEN, 7 + 2 + 0xFFFF);
     assert_eq!(FixedTrailingVecArgs::OFFSETS, [0, 2, 7]);
@@ -277,7 +277,7 @@ fn fixed_offset_layout_supports_trailing_flexible_vec() {
 }
 
 #[test]
-fn fixed_offset_layout_supports_eight_byte_trailing_flexible_vec_len_width() {
+fn fixed_offset_layout_supports_eight_byte_trailing_extendable_vec_len_width() {
     const PAYLOAD_LEN: usize = 0x1_0000;
 
     assert_eq!(FixedTrailingWideVecArgs::MIN_DATA_LEN, 1);
@@ -303,7 +303,7 @@ fn fixed_offset_layout_supports_eight_byte_trailing_flexible_vec_len_width() {
 }
 
 #[test]
-fn fixed_offset_layout_rejects_invalid_trailing_flexible_vec_encoding() {
+fn fixed_offset_layout_rejects_invalid_trailing_extendable_vec_encoding() {
     let base = [7_u16.to_le_bytes().as_slice(), &[0, 0, 0, 0, 0]].concat();
 
     let empty_storage = [base.as_slice(), 0_u16.to_le_bytes().as_slice()].concat();
@@ -328,7 +328,7 @@ fn fixed_offset_layout_rejects_invalid_trailing_flexible_vec_encoding() {
 }
 
 #[test]
-fn fixed_offset_layout_exposes_trailing_flexible_vec_storage_capacity() {
+fn fixed_offset_layout_exposes_trailing_extendable_vec_storage_capacity() {
     let storage = [
         7_u16.to_le_bytes().as_slice(),
         &[2, 1, 2, 0, 0],
@@ -353,7 +353,7 @@ fn fixed_offset_layout_exposes_trailing_flexible_vec_storage_capacity() {
 }
 
 #[test]
-fn fixed_offset_layout_mutates_trailing_flexible_vec_storage() {
+fn fixed_offset_layout_mutates_trailing_extendable_vec_storage() {
     let storage = TestStorage::new([7_u16.to_le_bytes().as_slice(), &[0, 0, 0, 0, 0]].concat());
     let mut view = FixedTrailingVecArgs::decode_mut(&storage).unwrap();
 
@@ -388,7 +388,7 @@ fn fixed_offset_layout_mutates_trailing_flexible_vec_storage() {
 }
 
 #[test]
-fn fixed_offset_layout_extends_trailing_flexible_vec_from_slice() {
+fn fixed_offset_layout_extends_trailing_extendable_vec_from_slice() {
     let storage = TestStorage::new(vec![7]);
     let mut view = FixedTrailingByteVecArgs::decode_mut(&storage).unwrap();
 
@@ -418,7 +418,7 @@ fn fixed_offset_layout_extends_trailing_flexible_vec_from_slice() {
 }
 
 #[test]
-fn fixed_offset_layout_extends_trailing_flexible_vec_from_non_u8_slice() {
+fn fixed_offset_layout_extends_trailing_extendable_vec_from_non_u8_slice() {
     let storage = TestStorage::new(vec![5]);
     let mut view = FixedTrailingU16VecArgs::decode_mut(&storage).unwrap();
 
@@ -886,12 +886,12 @@ fn fixed_offset_layout_mutates_fixed_capacity_fixed_layout_vec_storage() {
 #[fixed_offset_layout(buffer_offset = 0)]
 struct FixedTrailingEntryVecArgs {
     tag: u8,
-    #[flexible = 1]
+    #[extendable = 1]
     entries: Vec<FixedEntry>,
 }
 
 #[test]
-fn fixed_offset_layout_supports_trailing_flexible_fixed_layout_vec() {
+fn fixed_offset_layout_supports_trailing_extendable_fixed_layout_vec() {
     assert_eq!(FixedTrailingEntryVecArgs::MIN_DATA_LEN, 1);
     assert_eq!(
         FixedTrailingEntryVecArgs::MAX_DATA_LEN,
@@ -937,7 +937,7 @@ fn fixed_offset_layout_supports_trailing_flexible_fixed_layout_vec() {
 }
 
 #[test]
-fn fixed_offset_layout_mutates_trailing_flexible_fixed_layout_vec_storage() {
+fn fixed_offset_layout_mutates_trailing_extendable_fixed_layout_vec_storage() {
     let storage = TestStorage::new(vec![7]);
     let mut view = FixedTrailingEntryVecArgs::decode_mut(&storage).unwrap();
 
