@@ -30,7 +30,8 @@ enum FlexibleVecSource<'a, S: ?Sized> {
 /// expose both the active logical length and the storage capacity represented
 /// by the backing bytes. Generated mutable getters from `decode_mut()` return
 /// the same type backed by [`LayoutStorageMut`], which enables Vec-like
-/// operations such as `push`, `pop`, `set`, `truncate`, and `clear`.
+/// operations such as `push`, `extend_from_slice`, `pop`, `set`, `truncate`,
+/// and `clear`.
 ///
 /// A flexible Vec has no reserved bytes in canonical `encode()` output. When
 /// decoding account/storage bytes, however, the final field may include spare
@@ -314,6 +315,49 @@ where
 
         let index = self.len;
         self.write_bytes_at(index, bytemuck::bytes_of(&value))?;
+        self.write_len(next_len)?;
+        self.len = next_len;
+        self.refresh_capacity();
+        Ok(())
+    }
+
+    /// Appends fixed-value elements from a borrowed slice.
+    pub fn extend_from_slice(&mut self, values: &[T]) -> Result<(), ProgramError> {
+        if values.is_empty() {
+            return Ok(());
+        }
+
+        let next_len = self
+            .len
+            .checked_add(values.len())
+            .ok_or(DataLayoutError::LengthExceedsCapacity)?;
+        self.ensure_capacity(next_len)?;
+
+        let value_bytes = bytemuck::cast_slice(values);
+        let byte_len = values
+            .len()
+            .checked_mul(self.elem_size)
+            .ok_or(DataLayoutError::LengthExceedsCapacity)?;
+        if byte_len != value_bytes.len() {
+            return Err(DataLayoutError::InvalidDataLength.into());
+        }
+
+        let start = self
+            .data_start()
+            .checked_add(
+                self.len
+                    .checked_mul(self.elem_size)
+                    .ok_or(DataLayoutError::LengthExceedsCapacity)?,
+            )
+            .ok_or(DataLayoutError::LengthExceedsCapacity)?;
+        let end = start
+            .checked_add(byte_len)
+            .ok_or(DataLayoutError::LengthExceedsCapacity)?;
+        {
+            let mut bytes = self.storage()?.borrow_data_mut()?;
+            bytes[start..end].copy_from_slice(value_bytes);
+        }
+
         self.write_len(next_len)?;
         self.len = next_len;
         self.refresh_capacity();

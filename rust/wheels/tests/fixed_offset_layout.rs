@@ -204,6 +204,20 @@ struct FixedTrailingVecArgs {
 }
 
 #[fixed_offset_layout(buffer_offset = 0)]
+struct FixedTrailingByteVecArgs {
+    tag: u8,
+    #[flexible = 1]
+    payload: Vec<u8>,
+}
+
+#[fixed_offset_layout(buffer_offset = 0)]
+struct FixedTrailingU16VecArgs {
+    tag: u8,
+    #[flexible = 1]
+    values: Vec<u16>,
+}
+
+#[fixed_offset_layout(buffer_offset = 0)]
 struct FixedTrailingWideVecArgs {
     tag: u8,
     #[flexible = 8]
@@ -371,6 +385,87 @@ fn fixed_offset_layout_mutates_trailing_flexible_vec_storage() {
     let view = FixedTrailingVecArgs::decode(&aligned.0[..bytes.len()]).unwrap();
     assert_eq!(view.tail().len(), 0);
     assert_eq!(view.tail().capacity(), 2);
+}
+
+#[test]
+fn fixed_offset_layout_extends_trailing_flexible_vec_from_slice() {
+    let storage = TestStorage::new(vec![7]);
+    let mut view = FixedTrailingByteVecArgs::decode_mut(&storage).unwrap();
+
+    {
+        let mut payload = view.payload_mut().unwrap();
+        assert_eq!(payload.len(), 0);
+        assert_eq!(payload.capacity(), 0);
+
+        payload.extend_from_slice(&[]).unwrap();
+        assert_eq!(payload.len(), 0);
+        assert_eq!(payload.capacity(), 0);
+
+        payload.extend_from_slice(&[9, 8]).unwrap();
+        payload.extend_from_slice(&[7, 6]).unwrap();
+        payload.extend_from_slice(&[]).unwrap();
+        assert_eq!(payload.len(), 4);
+        assert_eq!(payload.capacity(), 4);
+    }
+
+    let bytes = storage.bytes();
+    assert_eq!(bytes, vec![7, 4, 9, 8, 7, 6]);
+
+    let aligned = aligned_copy::<16>(&bytes);
+    let view = FixedTrailingByteVecArgs::decode(&aligned.0[..bytes.len()]).unwrap();
+    assert_eq!(view.payload().as_slice(), &[9, 8, 7, 6]);
+    assert_eq!(view.payload().storage_len(), 1 + 4);
+}
+
+#[test]
+fn fixed_offset_layout_extends_trailing_flexible_vec_from_non_u8_slice() {
+    let storage = TestStorage::new(vec![5]);
+    let mut view = FixedTrailingU16VecArgs::decode_mut(&storage).unwrap();
+
+    {
+        let mut values = view.values_mut().unwrap();
+        values.extend_from_slice(&[0x0102, 0x0304]).unwrap();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values.capacity(), 2);
+    }
+
+    let bytes = storage.bytes();
+    assert_eq!(bytes, vec![5, 2, 0x02, 0x01, 0x04, 0x03]);
+
+    let aligned = aligned_copy::<16>(&bytes);
+    let view = FixedTrailingU16VecArgs::decode(&aligned.0[..bytes.len()]).unwrap();
+    assert_eq!(view.values().as_slice(), &[0x0102, 0x0304]);
+}
+
+#[test]
+fn fixed_offset_layout_extend_from_slice_rejects_len_width_overflow() {
+    let storage = TestStorage::new(vec![9]);
+    let values = (0..=254).map(|value| value as u8).collect::<Vec<_>>();
+
+    {
+        let mut view = FixedTrailingByteVecArgs::decode_mut(&storage).unwrap();
+        let mut payload = view.payload_mut().unwrap();
+        payload.extend_from_slice(&values).unwrap();
+        assert_eq!(payload.len(), 255);
+        assert_eq!(payload.capacity(), 255);
+    }
+
+    let bytes_before_overflow = storage.bytes();
+    {
+        let mut view = FixedTrailingByteVecArgs::decode_mut(&storage).unwrap();
+        let mut payload = view.payload_mut().unwrap();
+        assert_eq!(
+            payload.extend_from_slice(&[255]).unwrap_err(),
+            ProgramError::from(DataLayoutError::LengthExceedsCapacity)
+        );
+        assert_eq!(payload.len(), 255);
+        assert_eq!(payload.capacity(), 255);
+    }
+
+    assert_eq!(storage.bytes(), bytes_before_overflow);
+    let aligned = aligned_copy::<512>(&bytes_before_overflow);
+    let view = FixedTrailingByteVecArgs::decode(&aligned.0[..bytes_before_overflow.len()]).unwrap();
+    assert_eq!(view.payload().as_slice(), values.as_slice());
 }
 
 #[fixed_offset_layout(buffer_offset = 0)]
