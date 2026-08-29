@@ -3,7 +3,7 @@ use core::{marker::PhantomData, ops::Range};
 use bytemuck::Pod;
 use pinocchio::error::ProgramError;
 
-use super::{Encodable, FixedSizeLayout, LayoutStorageMut};
+use super::{Encodable, FixedSizeLayout, LayoutStorageMut, MAX_SUPPORTED_VEC_LEN};
 use crate::DataLayoutError;
 
 /// Marker for flexible Vec elements that are fixed-value/POD layout fields.
@@ -572,6 +572,6 @@ fn max_len(len_width: usize) -> usize {
     match len_width {
         0 => 0,
         1..=7 => (1usize << (len_width * 8)) - 1,
-        _ => usize::MAX,
+        _ => MAX_SUPPORTED_VEC_LEN,
     }
 }

@@ -2,6 +2,12 @@ use proc_macro2::Span;
 use quote::{quote, ToTokens};
 use syn::{Attribute, Expr, ExprLit, GenericArgument, Lit, LitInt, PathArguments, Type, TypePath};
 
+// An 8-byte flexible length header can encode far beyond practical account
+// sizes. Generated layout bounds are `usize` constants computed as
+// `len_width + max_len * elem_size`, so accepting the full `u64::MAX` range
+// would make those bounds overflow instead of being useful API.
+pub(crate) const MAX_SUPPORTED_VEC_LEN: usize = u32::MAX as usize;
+
 pub(crate) enum AccessMode {
     Copy,
     Ref,

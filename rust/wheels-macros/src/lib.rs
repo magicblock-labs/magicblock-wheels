@@ -53,7 +53,7 @@ mod variable_offset_layout;
 ///
 ///   - Trailing-flexible layouts.
 ///
-///     The final field may use `#[flexible = 1]` or `#[flexible = 2]` for a
+///     The final field may use `#[flexible = N]` for a
 ///     trailing `Vec<T>`, or `#[flexible]` for a trailing `Option<T>`. Earlier
 ///     fields still have fixed offsets, but total encoded length varies, so the
 ///     macro emits `MIN_DATA_LEN` and `MAX_DATA_LEN` instead of `DATA_LEN`.
@@ -113,8 +113,10 @@ mod variable_offset_layout;
 ///   - `#[flexible = N]`
 ///
 ///     - Applicable only to the final field when that field is `Vec<T>`.
-///     - `N` must be `1` or `2` and is the width, in bytes, of the encoded Vec
+///     - `N` must be `1..=8` and is the width, in bytes, of the encoded Vec
 ///       length header.
+///     - For `N = 8`, the supported Vec length is still capped at
+///       `u32::MAX`.
 ///     - The field contributes only its active payload bytes to canonical
 ///       encoded length.
 ///     - Generated immutable getters return `FlexibleVec`.

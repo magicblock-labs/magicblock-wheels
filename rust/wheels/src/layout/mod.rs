@@ -95,8 +95,8 @@
 //! | Flexible `Option<T>` | The final field may use `#[flexible]`; `None` omits the field entirely and `Some` writes tag plus payload. | Not supported as a field attribute. Use normal tagged options, or `option = implicit` for eligible compatibility types. |
 //! | Implicit `Option<T>` | Not supported. | ⚠️ Backward compatibility only; avoid for new types. The struct-level `option = implicit` mode omits option tags and saves one byte per `Option<T>`, but is allowed only when there are no Vec fields and option presence can be inferred unambiguously from total encoded length. |
 //! | `Vec<T>` of supported scalar/key types | Uses `#[capacity = N]` to reserve space for `N` elements. Views expose active `len` and a `<field>_capacity()` method. | Uses `#[flexible = N]` to encode only active elements. Views return borrowed slices like `&[T]`. |
-//! | Flexible `Vec<T>` | Allowed only as the final field with `#[flexible = 1]` or `#[flexible = 2]`. Canonical `encode()` writes only active bytes. `decode()` may receive larger storage and exposes spare trailing bytes as [`FlexibleVec::capacity`]. | Every Vec uses `#[flexible = N]`; Vec fields can appear before later fields. `N` can be `1..=8`. No capacity is modeled; only active encoded elements exist. |
-//! | `Vec<T>` of user-defined layout types | Requires `T: FixedSizeLayout`; uses `#[capacity = N]` or final `#[flexible = 1]`/`#[flexible = 2]`. Fixed-capacity getters return [`FixedLayoutSlice`]; final flexible getters return [`FlexibleVec`]. | Requires `#[element_size = fixed]` or `#[element_size = variable]`. Fixed elements return [`FixedLayoutSlice`]; variable elements return [`VariableLayoutSlice`]. |
+//! | Flexible `Vec<T>` | Allowed only as the final field with `#[flexible = N]`, where `N` can be `1..=8`. Canonical `encode()` writes only active bytes. `decode()` may receive larger storage and exposes spare trailing bytes as [`FlexibleVec::capacity`]. | Every Vec uses `#[flexible = N]`; Vec fields can appear before later fields. `N` can be `1..=8`. No capacity is modeled; only active encoded elements exist. |
+//! | `Vec<T>` of user-defined layout types | Requires `T: FixedSizeLayout`; uses `#[capacity = N]` or final `#[flexible = N]`. Fixed-capacity getters return [`FixedLayoutSlice`]; final flexible getters return [`FlexibleVec`]. | Requires `#[element_size = fixed]` or `#[element_size = variable]`. Fixed elements return [`FixedLayoutSlice`]; variable elements return [`VariableLayoutSlice`]. |
 //! | Mutation | `decode_mut(storage)` is generated for every fixed layout. Fixed-capacity Vec fields return [`FixedCapacityVec`] and can grow active `len` up to schema capacity without resizing storage. Final flexible Vec fields return [`FlexibleVec`] and may resize storage. | Not currently generated. |
 //! | Prefix decoding | Constant-size layouts implement [`PrefixDecodable`]. Trailing-flexible layouts implement [`Decodable`]; final flexible Vec decodes the supplied storage region, while final flexible Option remains exactly framed. | Normal layouts implement [`PrefixDecodable`]. Layouts using `option = implicit` need exact framing and implement [`Decodable`]. |
 //! | Alignment | Use `buffer_offset = 0..=7` when the input starts at a known offset from an 8-byte aligned base. Use `buffer_offset = unknown` only when generated views do not borrow alignment-sensitive fields. | Use `buffer_offset = 0..=7` when the input starts at a known offset from an 8-byte aligned base; use `buffer_offset = unknown` only when generated views do not borrow alignment-sensitive fields. |
@@ -178,6 +178,12 @@
 //! and why the macro rejects ambiguous option-size combinations.
 //!
 use crate::DataLayoutError;
+
+// An 8-byte flexible length header can encode far beyond practical account
+// sizes. Layout bounds are `usize` values computed as
+// `len_width + max_len * elem_size`, so accepting the full `u64::MAX` range
+// would make those bounds overflow instead of being useful API.
+pub(super) const MAX_SUPPORTED_VEC_LEN: usize = u32::MAX as usize;
 
 mod fixed_capacity_vec;
 mod fixed_slice;
