@@ -15,7 +15,7 @@ use syn::{
     ItemStruct, Lit, Meta, Token, Type,
 };
 
-const FIELD_ATTRIBUTES: &[&str] = &["capacity", "flexible", "element_size"];
+const FIELD_ATTRIBUTES: &[&str] = &["capacity", "extendable", "flexible", "element_size"];
 const LAYOUT_NAME: &str = "variable_offset_layout";
 const UNSUPPORTED_FIELD_MESSAGE: &str =
     "variable_offset_layout fields must be bool, Pubkey, integer primitives, or fixed-size arrays of integer primitives";
@@ -2184,6 +2184,11 @@ fn parse_field_attr(field: &syn::Field) -> syn::Result<FieldAttributes> {
                     ));
                 }
             };
+        } else if attr.path().is_ident("extendable") {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "`#[extendable = N]` is not supported by variable_offset_layout; use `#[flexible = N]` for Vec fields",
+            ));
         } else if attr.path().is_ident("element_size") {
             if attributes.element_size.is_some() {
                 return Err(syn::Error::new_spanned(
@@ -2751,6 +2756,21 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("flexible must be in the range 1..=8"));
+    }
+
+    #[test]
+    fn variable_offset_layout_rejects_extendable_vec() {
+        let item: syn::ItemStruct = parse_quote! {
+            struct Args {
+                #[extendable = 1]
+                payload: Vec<u8>,
+            }
+        };
+
+        let error = expand_variable_offset_layout("buffer_offset = 0", &item)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("use `#[flexible = N]`"));
     }
 
     #[test]

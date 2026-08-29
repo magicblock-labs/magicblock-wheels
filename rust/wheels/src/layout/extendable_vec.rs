@@ -6,34 +6,34 @@ use pinocchio::error::ProgramError;
 use super::{Encodable, FixedSizeLayout, LayoutStorageMut, MAX_SUPPORTED_VEC_LEN};
 use crate::DataLayoutError;
 
-/// Marker for flexible Vec elements that are fixed-value/POD layout fields.
+/// Marker for extendable Vec elements that are fixed-value/POD layout fields.
 ///
 /// This is used by generated code to select the `&[T]`-style access path.
 #[derive(Clone, Copy, Debug)]
 pub enum FixedValueElement {}
 
-/// Marker for flexible Vec elements that are fixed-size layout structs.
+/// Marker for extendable Vec elements that are fixed-size layout structs.
 ///
 /// This is used by generated code to select the `T::View<'a>` access path.
 #[derive(Clone, Copy, Debug)]
 pub enum FixedLayoutElement {}
 
-enum FlexibleVecSource<'a, S: ?Sized> {
+enum ExtendableVecSource<'a, S: ?Sized> {
     Bytes(&'a [u8]),
     Storage(&'a S),
 }
 
-/// View over a trailing `#[flexible = N] Vec<T>` in `fixed_offset_layout`.
+/// View over a trailing `#[extendable = N] Vec<T>` in `fixed_offset_layout`.
 ///
 /// Users continue to write `Vec<T>` in layout structs. Generated immutable
-/// getters return `FlexibleVec` for a trailing flexible Vec so the view can
+/// getters return `ExtendableVec` for a trailing extendable Vec so the view can
 /// expose both the active logical length and the storage capacity represented
 /// by the backing bytes. Generated mutable getters from `decode_mut()` return
 /// the same type backed by [`LayoutStorageMut`], which enables Vec-like
 /// operations such as `push`, `extend_from_slice`, `pop`, `set`, `truncate`,
 /// and `clear`.
 ///
-/// A flexible Vec has no reserved bytes in canonical `encode()` output. When
+/// An extendable Vec has no reserved bytes in canonical `encode()` output. When
 /// decoding account/storage bytes, however, the final field may include spare
 /// trailing storage. `len()` reports the active element count, while
 /// `capacity()` reports how many elements fit in the supplied backing storage.
@@ -43,8 +43,8 @@ enum FlexibleVecSource<'a, S: ?Sized> {
 /// runtime fields to keep return types simple. If CU measurements show this
 /// matters for very small budgets, benchmark const-generic offsets/metadata or
 /// field-specific generated wrappers.
-pub struct FlexibleVec<'a, T, S: ?Sized = (), K = FixedValueElement> {
-    source: FlexibleVecSource<'a, S>,
+pub struct ExtendableVec<'a, T, S: ?Sized = (), K = FixedValueElement> {
+    source: ExtendableVecSource<'a, S>,
     offset: usize,
     len_width: usize,
     elem_size: usize,
@@ -53,7 +53,7 @@ pub struct FlexibleVec<'a, T, S: ?Sized = (), K = FixedValueElement> {
     _marker: PhantomData<(T, K)>,
 }
 
-impl<'a, T> FlexibleVec<'a, T, (), FixedValueElement> {
+impl<'a, T> ExtendableVec<'a, T, (), FixedValueElement> {
     #[doc(hidden)]
     pub fn new_fixed_value(
         bytes: &'a [u8],
@@ -63,7 +63,7 @@ impl<'a, T> FlexibleVec<'a, T, (), FixedValueElement> {
     ) -> Result<Self, DataLayoutError> {
         let (len, capacity) = decode_storage_len(bytes, offset, len_width, elem_size)?;
         Ok(Self {
-            source: FlexibleVecSource::Bytes(bytes),
+            source: ExtendableVecSource::Bytes(bytes),
             offset,
             len_width,
             elem_size,
@@ -74,7 +74,7 @@ impl<'a, T> FlexibleVec<'a, T, (), FixedValueElement> {
     }
 }
 
-impl<'a, T> FlexibleVec<'a, T, (), FixedLayoutElement> {
+impl<'a, T> ExtendableVec<'a, T, (), FixedLayoutElement> {
     #[doc(hidden)]
     pub fn new_fixed_layout(
         bytes: &'a [u8],
@@ -87,7 +87,7 @@ impl<'a, T> FlexibleVec<'a, T, (), FixedLayoutElement> {
     {
         let (len, capacity) = decode_storage_len(bytes, offset, len_width, elem_size)?;
         let vec = Self {
-            source: FlexibleVecSource::Bytes(bytes),
+            source: ExtendableVecSource::Bytes(bytes),
             offset,
             len_width,
             elem_size,
@@ -104,7 +104,7 @@ impl<'a, T> FlexibleVec<'a, T, (), FixedLayoutElement> {
     }
 }
 
-impl<'a, T, S> FlexibleVec<'a, T, S, FixedValueElement>
+impl<'a, T, S> ExtendableVec<'a, T, S, FixedValueElement>
 where
     S: LayoutStorageMut + ?Sized,
 {
@@ -121,7 +121,7 @@ where
         drop(bytes);
 
         Ok(Self {
-            source: FlexibleVecSource::Storage(storage),
+            source: ExtendableVecSource::Storage(storage),
             offset,
             len_width,
             elem_size,
@@ -132,7 +132,7 @@ where
     }
 }
 
-impl<'a, T, S> FlexibleVec<'a, T, S, FixedLayoutElement>
+impl<'a, T, S> ExtendableVec<'a, T, S, FixedLayoutElement>
 where
     S: LayoutStorageMut + ?Sized,
 {
@@ -160,7 +160,7 @@ where
         drop(bytes);
 
         Ok(Self {
-            source: FlexibleVecSource::Storage(storage),
+            source: ExtendableVecSource::Storage(storage),
             offset,
             len_width,
             elem_size,
@@ -171,7 +171,7 @@ where
     }
 }
 
-impl<'a, T, S: ?Sized, K> FlexibleVec<'a, T, S, K> {
+impl<'a, T, S: ?Sized, K> ExtendableVec<'a, T, S, K> {
     /// Returns the active logical element count.
     pub fn len(&self) -> usize {
         self.len
@@ -189,7 +189,7 @@ impl<'a, T, S: ?Sized, K> FlexibleVec<'a, T, S, K> {
 
     /// Returns the active encoded length of this Vec field.
     ///
-    /// Empty flexible Vec values omit the length header and payload, so their
+    /// Empty extendable Vec values omit the length header and payload, so their
     /// active encoded length is zero.
     pub fn encoded_len(&self) -> usize {
         if self.len == 0 {
@@ -209,11 +209,11 @@ impl<'a, T, S: ?Sized, K> FlexibleVec<'a, T, S, K> {
     }
 }
 
-impl<'a, T, K> FlexibleVec<'a, T, (), K> {
+impl<'a, T, K> ExtendableVec<'a, T, (), K> {
     fn all_bytes(&self) -> &'a [u8] {
         match self.source {
-            FlexibleVecSource::Bytes(bytes) => bytes,
-            FlexibleVecSource::Storage(_) => unreachable!(),
+            ExtendableVecSource::Bytes(bytes) => bytes,
+            ExtendableVecSource::Storage(_) => unreachable!(),
         }
     }
 
@@ -221,7 +221,7 @@ impl<'a, T, K> FlexibleVec<'a, T, (), K> {
     ///
     /// The returned bytes include the length header when one is present and all
     /// spare trailing capacity supplied to `decode()`. They do not include the
-    /// fixed fields that come before the flexible Vec.
+    /// fixed fields that come before the extendable Vec.
     pub fn storage_bytes(&self) -> &'a [u8] {
         &self.all_bytes()[self.offset..]
     }
@@ -241,7 +241,7 @@ impl<'a, T, K> FlexibleVec<'a, T, (), K> {
     }
 }
 
-impl<'a, T> FlexibleVec<'a, T, (), FixedValueElement>
+impl<'a, T> ExtendableVec<'a, T, (), FixedValueElement>
 where
     T: Pod,
 {
@@ -251,7 +251,7 @@ where
     }
 }
 
-impl<'a, T> FlexibleVec<'a, T, (), FixedLayoutElement>
+impl<'a, T> ExtendableVec<'a, T, (), FixedLayoutElement>
 where
     T: FixedSizeLayout,
 {
@@ -267,15 +267,15 @@ where
     }
 
     /// Iterates over active fixed-size layout elements.
-    pub fn iter(&self) -> FixedLayoutFlexibleVecIter<'a, T> {
-        FixedLayoutFlexibleVecIter {
+    pub fn iter(&self) -> FixedLayoutExtendableVecIter<'a, T> {
+        FixedLayoutExtendableVecIter {
             bytes: self.active_bytes(),
             _marker: PhantomData,
         }
     }
 }
 
-pub struct FixedLayoutFlexibleVecIter<'a, T>
+pub struct FixedLayoutExtendableVecIter<'a, T>
 where
     T: FixedSizeLayout,
 {
@@ -283,7 +283,7 @@ where
     _marker: PhantomData<T>,
 }
 
-impl<'a, T> Iterator for FixedLayoutFlexibleVecIter<'a, T>
+impl<'a, T> Iterator for FixedLayoutExtendableVecIter<'a, T>
 where
     T: FixedSizeLayout,
 {
@@ -300,7 +300,7 @@ where
     }
 }
 
-impl<'a, T, S> FlexibleVec<'a, T, S, FixedValueElement>
+impl<'a, T, S> ExtendableVec<'a, T, S, FixedValueElement>
 where
     T: Pod,
     S: LayoutStorageMut + ?Sized,
@@ -391,7 +391,7 @@ where
     }
 }
 
-impl<'a, T, S> FlexibleVec<'a, T, S, FixedLayoutElement>
+impl<'a, T, S> ExtendableVec<'a, T, S, FixedLayoutElement>
 where
     T: Encodable + FixedSizeLayout,
     S: LayoutStorageMut + ?Sized,
@@ -434,7 +434,7 @@ where
     }
 }
 
-impl<'a, T, S, K> FlexibleVec<'a, T, S, K>
+impl<'a, T, S, K> ExtendableVec<'a, T, S, K>
 where
     S: LayoutStorageMut + ?Sized,
 {
@@ -466,8 +466,8 @@ where
 
     fn storage(&self) -> Result<&'a S, ProgramError> {
         match self.source {
-            FlexibleVecSource::Storage(storage) => Ok(storage),
-            FlexibleVecSource::Bytes(_) => Err(DataLayoutError::InvalidDataLength.into()),
+            ExtendableVecSource::Storage(storage) => Ok(storage),
+            ExtendableVecSource::Bytes(_) => Err(DataLayoutError::InvalidDataLength.into()),
         }
     }
 
