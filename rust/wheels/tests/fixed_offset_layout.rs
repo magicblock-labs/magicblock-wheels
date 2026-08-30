@@ -6,7 +6,9 @@ use pinocchio::error::ProgramError;
 use pinocchio::Address;
 use wheels::{
     fixed_offset_layout,
-    layout::{Decodable, Encodable, LayoutStorage, LayoutStorageMut, PrefixDecodable},
+    layout::{
+        Decodable, Encodable, LayoutStorage, LayoutStorageMut, MaxLenStorage, PrefixDecodable,
+    },
     DataLayoutError, Pubkey,
 };
 
@@ -21,15 +23,25 @@ fn aligned_copy<const N: usize>(bytes: &[u8]) -> Aligned<N> {
     aligned
 }
 
-struct TestStorage(RefCell<Vec<u8>>);
+struct TestStorage {
+    bytes: RefCell<Vec<u8>>,
+    resize_lens: RefCell<Vec<usize>>,
+}
 
 impl TestStorage {
     fn new(bytes: Vec<u8>) -> Self {
-        Self(RefCell::new(bytes))
+        Self {
+            bytes: RefCell::new(bytes),
+            resize_lens: RefCell::new(Vec::new()),
+        }
     }
 
     fn bytes(&self) -> Vec<u8> {
-        self.0.borrow().clone()
+        self.bytes.borrow().clone()
+    }
+
+    fn resize_lens(&self) -> Vec<usize> {
+        self.resize_lens.borrow().clone()
     }
 }
 
@@ -40,11 +52,11 @@ impl LayoutStorage for TestStorage {
         Self: 'a;
 
     fn data_len(&self) -> usize {
-        self.0.borrow().len()
+        self.bytes.borrow().len()
     }
 
     fn borrow_data(&self) -> Result<Self::Ref<'_>, ProgramError> {
-        Ok(Ref::map(self.0.borrow(), Vec::as_slice))
+        Ok(Ref::map(self.bytes.borrow(), Vec::as_slice))
     }
 }
 
@@ -55,11 +67,12 @@ impl LayoutStorageMut for TestStorage {
         Self: 'a;
 
     fn borrow_data_mut(&self) -> Result<Self::RefMut<'_>, ProgramError> {
-        Ok(RefMut::map(self.0.borrow_mut(), Vec::as_mut_slice))
+        Ok(RefMut::map(self.bytes.borrow_mut(), Vec::as_mut_slice))
     }
 
     fn resize(&self, new_len: usize) -> Result<(), ProgramError> {
-        self.0.borrow_mut().resize(new_len, 0);
+        self.resize_lens.borrow_mut().push(new_len);
+        self.bytes.borrow_mut().resize(new_len, 0);
         Ok(())
     }
 }
@@ -415,6 +428,83 @@ fn fixed_offset_layout_extends_trailing_extendable_vec_from_slice() {
     let view = FixedTrailingByteVecArgs::decode(&aligned.0[..bytes.len()]).unwrap();
     assert_eq!(view.payload().as_slice(), &[9, 8, 7, 6]);
     assert_eq!(view.payload().storage_len(), 1 + 4);
+}
+
+#[test]
+fn max_len_storage_grows_extendable_vec_in_steps() {
+    let storage = TestStorage::new(vec![7]);
+    let max_len_storage = MaxLenStorage::new(&storage, 9, 4);
+
+    {
+        let mut view = FixedTrailingByteVecArgs::decode_mut(&max_len_storage).unwrap();
+        let mut payload = view.payload_mut().unwrap();
+
+        for value in [1, 2, 3, 4] {
+            payload.push(value).unwrap();
+        }
+
+        assert_eq!(payload.len(), 4);
+        assert_eq!(payload.capacity(), 7);
+        assert_eq!(payload.storage_len(), 8);
+    }
+
+    assert_eq!(storage.resize_lens(), vec![5, 9]);
+    assert_eq!(storage.bytes(), vec![7, 4, 1, 2, 3, 4, 0, 0, 0]);
+
+    let bytes = storage.bytes();
+    let aligned = aligned_copy::<16>(&bytes);
+    let view = FixedTrailingByteVecArgs::decode(&aligned.0[..bytes.len()]).unwrap();
+    assert_eq!(view.payload().as_slice(), &[1, 2, 3, 4]);
+    assert_eq!(view.payload().capacity(), 7);
+}
+
+#[test]
+fn max_len_storage_steps_extendable_vec_extend_from_slice() {
+    let storage = TestStorage::new(vec![7]);
+    let max_len_storage = MaxLenStorage::new(&storage, 8, 4);
+
+    {
+        let mut view = FixedTrailingByteVecArgs::decode_mut(&max_len_storage).unwrap();
+        let mut payload = view.payload_mut().unwrap();
+        payload.extend_from_slice(&[1, 2]).unwrap();
+
+        assert_eq!(payload.len(), 2);
+        assert_eq!(payload.capacity(), 3);
+    }
+
+    assert_eq!(storage.resize_lens(), vec![5]);
+    assert_eq!(storage.bytes(), vec![7, 2, 1, 2, 0]);
+}
+
+#[test]
+fn max_len_storage_rejects_growth_above_max_len() {
+    let storage = TestStorage::new(vec![7]);
+    let max_len_storage = MaxLenStorage::new(&storage, 4, 4);
+
+    {
+        let mut view = FixedTrailingByteVecArgs::decode_mut(&max_len_storage).unwrap();
+        let mut payload = view.payload_mut().unwrap();
+        assert_eq!(
+            payload.extend_from_slice(&[1, 2, 3]).unwrap_err(),
+            ProgramError::from(DataLayoutError::LengthExceedsCapacity)
+        );
+        assert_eq!(payload.len(), 0);
+        assert_eq!(payload.capacity(), 0);
+    }
+
+    assert_eq!(storage.resize_lens(), Vec::<usize>::new());
+    assert_eq!(storage.bytes(), vec![7]);
+}
+
+#[test]
+fn max_len_storage_shrinks_exactly() {
+    let storage = TestStorage::new(vec![0; 9]);
+    let max_len_storage = MaxLenStorage::new(&storage, 16, 4);
+
+    max_len_storage.resize(3).unwrap();
+
+    assert_eq!(storage.resize_lens(), vec![3]);
+    assert_eq!(storage.bytes(), vec![0; 3]);
 }
 
 #[test]
