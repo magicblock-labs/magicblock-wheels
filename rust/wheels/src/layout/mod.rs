@@ -101,6 +101,20 @@
 //! | Prefix decoding | Constant-size layouts implement [`PrefixDecodable`]. Trailing variable-length layouts implement [`Decodable`]; final extendable Vec decodes the supplied storage region, while final flexible Option remains exactly framed. | Normal layouts implement [`PrefixDecodable`]. Layouts using `option = implicit` need exact framing and implement [`Decodable`]. |
 //! | Alignment | Use `buffer_offset = 0..=7` when the input starts at a known offset from an 8-byte aligned base. Use `buffer_offset = unknown` only when generated views do not borrow alignment-sensitive fields. | Use `buffer_offset = 0..=7` when the input starts at a known offset from an 8-byte aligned base; use `buffer_offset = unknown` only when generated views do not borrow alignment-sensitive fields. |
 //!
+//! # Attribute Reference
+//!
+//! | Attribute | `fixed_offset_layout` | `variable_offset_layout` | Meaning |
+//! |---|---|---|---|
+//! | `buffer_offset = 0..=7` | Struct-level; required. | Struct-level; required. | Declares the known byte offset of the decoded slice from an 8-byte aligned base. The decoder validates that pointer offset, and the macro uses it to decide which borrowed views are alignment-safe. |
+//! | `buffer_offset = unknown` | Struct-level; required alternative. | Struct-level; required alternative. | Use when the slice start address is not known. The decoder skips pointer-offset checking, and the macro rejects borrowed views that need alignment greater than 1. |
+//! | `option = implicit` | Not supported. | Struct-level; optional. | Backward-compatibility mode for structs without Vec fields. It omits option tags and infers option presence from the total encoded length. |
+//! | `#[capacity = N]` | Field-level; fixed-capacity `Vec<T>` only. | Not supported. | Reserves exactly `N` element slots in fixed-offset storage. The active Vec length may change up to that schema capacity without resizing storage. |
+//! | `#[extendable = N]` | Field-level; final `Vec<T>` only. | Not supported. | Uses an `N`-byte length header (`1..=8`) for a trailing Vec. `N` is length-header width, not capacity. Canonical encoding contains only active elements, while decoding larger trailing storage exposes spare capacity through [`ExtendableVec`]. |
+//! | `#[flexible]` | Field-level; final `Option<T>` only. | Not supported. | Makes a trailing option omit all bytes for `None`; `Some` stores the normal option tag plus payload. |
+//! | `#[flexible = N]` | Not supported; fixed trailing Vecs use `#[extendable = N]`. | Field-level; every `Vec<T>` field. | Uses an `N`-byte length header (`1..=8`) and encodes only active elements. `N` is length-header width, not capacity, and later field offsets are decoded dynamically. |
+//! | `#[element_size = fixed]` | Not supported. | Field-level; user-defined `Vec<T>` element types only. | Declares that each nested layout element has constant encoded width, so generated getters can return [`FixedLayoutSlice`]. |
+//! | `#[element_size = variable]` | Not supported. | Field-level; user-defined `Vec<T>` element types only. | Declares that nested layout elements are prefix-decodable variable-size values, so generated getters return [`VariableLayoutSlice`]. |
+//!
 //! # Mutability
 //!
 //! Mutability is supported only by
@@ -132,6 +146,10 @@
 //! In other words, only a trailing extendable Vec can expand its backing
 //! capacity. A non-trailing fixed-capacity Vec can still expand its active
 //! length, but only up to the capacity reserved by the schema.
+//! Direct storage implementations such as `AccountView` resize to exactly the
+//! requested byte length. To reduce repeated reallocations while growing a
+//! trailing extendable Vec in a loop, wrap the storage in [`MaxLenStorage`]
+//! before calling `decode_mut()`.
 //!
 //! # Practical Guidelines
 //!
@@ -197,7 +215,7 @@ pub use extendable_vec::{
 };
 pub use fixed_capacity_vec::FixedCapacityVec;
 pub use fixed_slice::{FixedLayoutSlice, FixedLayoutSliceIter};
-pub use storage::{LayoutStorage, LayoutStorageMut};
+pub use storage::{LayoutStorage, LayoutStorageMut, MaxLenStorage};
 pub use value_mut::{
     LayoutBoolMut, LayoutBoolOptionMut, LayoutCopyMut, LayoutOptionMut, LayoutValueMut,
 };
