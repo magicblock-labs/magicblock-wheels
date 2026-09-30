@@ -183,14 +183,14 @@ fn variable_layout_supports_address_vec() {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[fixed_offset_layout(buffer_offset = unaligned)]
+#[fixed_offset_layout(buffer_offset = unknown)]
 struct FixedVerifierEntry {
     verifier_identity: Pubkey,
     verifier_bond: Pubkey,
     weight: u64,
 }
 
-#[variable_offset_layout(buffer_offset = unaligned)]
+#[variable_offset_layout(buffer_offset = unknown)]
 struct FixedEntryRegistryArgs {
     registry_revision: u64,
     #[flexible = 4]
@@ -198,7 +198,7 @@ struct FixedEntryRegistryArgs {
     entries: Vec<FixedVerifierEntry>,
 }
 
-#[variable_offset_layout(buffer_offset = unaligned)]
+#[variable_offset_layout(buffer_offset = unknown)]
 struct FixedEntryRegistryWithChecksumArgs {
     registry_revision: u64,
     #[flexible = 1]
@@ -207,7 +207,7 @@ struct FixedEntryRegistryWithChecksumArgs {
     checksum: u16,
 }
 
-#[variable_offset_layout(buffer_offset = unaligned)]
+#[variable_offset_layout(buffer_offset = unknown)]
 struct TinyFixedEntryRegistryArgs {
     registry_revision: u64,
     #[flexible = 1]
@@ -353,14 +353,14 @@ fn variable_layout_rejects_fixed_size_layout_vec_capacity_overflow() {
     );
 }
 
-#[variable_offset_layout(buffer_offset = unaligned)]
+#[variable_offset_layout(buffer_offset = unknown)]
 struct PrefixEntry {
     id: u16,
     #[flexible = 1]
     payload: Vec<u8>,
 }
 
-#[variable_offset_layout(buffer_offset = unaligned)]
+#[variable_offset_layout(buffer_offset = unknown)]
 struct PrefixEntryRegistryArgs {
     version: u8,
     #[flexible = 1]
@@ -369,7 +369,7 @@ struct PrefixEntryRegistryArgs {
     checksum: u16,
 }
 
-#[variable_offset_layout(buffer_offset = unaligned)]
+#[variable_offset_layout(buffer_offset = unknown)]
 struct PrefixEntryLogArgs {
     #[flexible = 1]
     #[element_size = variable]
@@ -979,8 +979,8 @@ fn variable_layout_buffer_offset_one_allows_unaligned_copy_only_views() {
     assert_eq!(view.counter(), 7);
 }
 
-#[variable_offset_layout(buffer_offset = unaligned)]
-struct UnalignedDynamicArgs {
+#[variable_offset_layout(buffer_offset = unknown)]
+struct UnknownOffsetArgs {
     amount: u64,
     enabled: bool,
     authority: Pubkey,
@@ -991,7 +991,7 @@ struct UnalignedDynamicArgs {
 }
 
 #[test]
-fn variable_layout_unaligned_buffer_offset_decodes_copy_and_alignment_one_views() {
+fn variable_layout_unknown_buffer_offset_decodes_copy_and_alignment_one_views() {
     let mut aligned = Aligned([0; 80]);
     let bytes = &mut aligned.0[1..];
 
@@ -1003,7 +1003,7 @@ fn variable_layout_unaligned_buffer_offset_decodes_copy_and_alignment_one_views(
     bytes[74..77].copy_from_slice(&[4, 5, 6]);
     bytes[77..79].copy_from_slice(&9_u16.to_le_bytes());
 
-    let view = UnalignedDynamicArgs::decode(&bytes[..79]).unwrap();
+    let view = UnknownOffsetArgs::decode(&bytes[..79]).unwrap();
 
     assert_eq!(view.amount(), 55);
     assert!(view.enabled());
