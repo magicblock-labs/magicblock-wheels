@@ -34,6 +34,7 @@ pub(crate) fn expand_fixed_offset_layout(
 
     let struct_name = &emitted_input.ident;
     let view_name = format_ident!("{}View", struct_name);
+    let view_mut_name = format_ident!("{}ViewMut", struct_name);
     let buffer_offset_validation = match args.buffer_offset {
         BufferOffset::Fixed(buffer_offset) => {
             let buffer_offset_lit = usize_lit(buffer_offset);
@@ -69,6 +70,7 @@ pub(crate) fn expand_fixed_offset_layout(
 
     let mut where_bounds = Vec::<proc_macro2::TokenStream>::new();
     let mut view_methods = Vec::new();
+    let mut view_mut_methods = Vec::new();
 
     let mut validate_steps = Vec::new();
     let mut layout_error: Option<syn::Error> = None;
@@ -110,6 +112,12 @@ pub(crate) fn expand_fixed_offset_layout(
             field_ident,
         ));
         view_methods.push(layout.gen_view_methods(offset_expr.clone(), field_ident)?);
+        view_mut_methods.push(layout.gen_view_mut_methods(
+            offset_expr.clone(),
+            offset_value,
+            args.buffer_offset,
+            field_ident,
+        )?);
 
         fields_encode_expr =
             layout.gen_field_encode(fields_encode_expr, offset_expr.clone(), field_ident);
@@ -160,7 +168,6 @@ pub(crate) fn expand_fixed_offset_layout(
             "Sum of encodable-sizes is computed from nested fixed-size layouts.".to_string()
         });
     let has_trailing_flexible_field = trailing_flexible_field.is_some();
-
     let (datalen_vars, datalen_check, check_log_expr, encoded_len_expr) =
         match trailing_flexible_field {
             Some((trailing_flexible_field, comptime_optlen)) => {
@@ -283,6 +290,44 @@ pub(crate) fn expand_fixed_offset_layout(
     } else {
         quote!()
     };
+    let decode_mut_fn = quote! {
+        pub fn decode_mut<'a, S>(
+            storage: &'a S,
+        ) -> core::result::Result<#view_mut_name<'a, S>, ::pinocchio::error::ProgramError>
+        where
+            S: ::wheels::layout::LayoutStorageMut + ?Sized,
+        {
+            let bytes = storage.borrow_data()?;
+            Self::__validate_bytes(&bytes)
+                .map_err(::pinocchio::error::ProgramError::from)?;
+            drop(bytes);
+
+            Ok(#view_mut_name { storage })
+        }
+    };
+    let view_mut_bounds = where_bounds.iter();
+    let view_mut_type = quote! {
+        #[allow(dead_code)]
+        #[derive(Debug)]
+        pub struct #view_mut_name<'a, S>
+        where
+            S: ::wheels::layout::LayoutStorageMut + ?Sized,
+        {
+            storage: &'a S,
+        }
+
+        impl<'a, S> #view_mut_name<'a, S>
+        where
+            S: ::wheels::layout::LayoutStorageMut + ?Sized,
+            #(#view_mut_bounds,)*
+        {
+            pub fn storage_len(&self) -> usize {
+                self.storage.data_len()
+            }
+
+            #(#view_mut_methods)*
+        }
+    };
 
     Ok(quote! {
         #emitted_input
@@ -293,6 +338,8 @@ pub(crate) fn expand_fixed_offset_layout(
 
             #[doc = "Byte offsets marking the start of each field"]
             pub const OFFSETS: [usize; #field_count_expr] = #offsets_expr;
+
+            #decode_mut_fn
 
             fn __validate_bytes(
                 bytes: &[u8],
@@ -418,16 +465,22 @@ pub(crate) fn expand_fixed_offset_layout(
                 }
 
                 let len = Self::__read_vec_len(bytes, offset, len_width);
-                if len == 0 {
+                let capacity_bytes = bytes.len() - offset - len_width;
+                if capacity_bytes % elem_size != 0 {
                     ::pinocchio_log::log!(
-                        "Invalid flexible Vec length for field {}::{} : empty Vec must omit the length header",
+                        "Invalid flexible Vec storage for field {}::{} : payload capacity bytes {} are not a multiple of element size {}",
                         stringify!(#struct_name),
                         field_name,
+                        capacity_bytes,
+                        elem_size,
                     );
                     return Err(::wheels::DataLayoutError::InvalidDataLength);
                 }
-                if len > capacity {
-                    ::pinocchio_log::log!("Invalid Vec length for field {}::{} : capacity = {}, len = {}", stringify!(#struct_name), field_name, capacity, len);
+
+                let storage_capacity = capacity_bytes / elem_size;
+                let effective_capacity = core::cmp::min(storage_capacity, capacity);
+                if len > effective_capacity {
+                    ::pinocchio_log::log!("Invalid Vec length for field {}::{} : capacity = {}, len = {}", stringify!(#struct_name), field_name, effective_capacity, len);
                     return Err(::wheels::DataLayoutError::LengthExceedsCapacity);
                 }
 
@@ -442,17 +495,6 @@ pub(crate) fn expand_fixed_offset_layout(
                     );
                     return Err(::wheels::DataLayoutError::TruncatedVectorPayload);
                 }
-                if bytes.len() > expected_len {
-                    ::pinocchio_log::log!(
-                        "Invalid Vec payload length for field {}::{} : expected {} bytes, found {}",
-                        stringify!(#struct_name),
-                        field_name,
-                        expected_len,
-                        bytes.len(),
-                    );
-                    return Err(::wheels::DataLayoutError::InvalidDataLength);
-                }
-
                 Ok(())
             }
         }
@@ -502,6 +544,8 @@ pub(crate) fn expand_fixed_offset_layout(
 
             #(#view_methods)*
         }
+
+        #view_mut_type
     })
 }
 
@@ -558,6 +602,27 @@ impl FixedVecElementKind {
         match self {
             Self::FixedValue(value) => value.needs_pod_bound(),
             Self::FixedSizeLayout { .. } => false,
+        }
+    }
+
+    fn flexible_marker(&self) -> proc_macro2::TokenStream {
+        match self {
+            Self::FixedValue(_) => quote!(::wheels::layout::FixedValueElement),
+            Self::FixedSizeLayout { .. } => quote!(::wheels::layout::FixedLayoutElement),
+        }
+    }
+
+    fn flexible_new_storage_fn(&self) -> Ident {
+        match self {
+            Self::FixedValue(_) => format_ident!("new_fixed_value_storage"),
+            Self::FixedSizeLayout { .. } => format_ident!("new_fixed_layout_storage"),
+        }
+    }
+
+    fn fixed_capacity_new_storage_fn(&self) -> Ident {
+        match self {
+            Self::FixedValue(_) => format_ident!("new_fixed_value_storage"),
+            Self::FixedSizeLayout { .. } => format_ident!("new_fixed_layout_storage"),
         }
     }
 }
@@ -1170,31 +1235,214 @@ impl FixedFieldKind {
                 } else {
                     match elem {
                         FixedVecElementKind::FixedValue(_) => Ok(quote! {
-                            pub fn #field_ident(&self) -> &[#elem_ty] {
-                                if self.bytes.len() == #offset {
-                                    return &[];
-                                }
-                                let len = #len_expr;
-                                let start = #offset + #len_width_lit;
-                                let end = start + (len * #elem_size);
-                                ::bytemuck::cast_slice::<u8, #elem_ty>(&self.bytes[start..end])
+                            pub fn #field_ident(
+                                &self,
+                            ) -> ::wheels::layout::FlexibleVec<
+                                'a,
+                                #elem_ty,
+                                (),
+                                ::wheels::layout::FixedValueElement,
+                            > {
+                                ::wheels::layout::FlexibleVec::new_fixed_value(
+                                    self.bytes,
+                                    #offset,
+                                    #len_width_lit,
+                                    #elem_size,
+                                )
+                                .expect("validated flexible Vec")
                             }
                         }),
                         FixedVecElementKind::FixedSizeLayout { .. } => Ok(quote! {
                             pub fn #field_ident(
                                 &self,
-                            ) -> ::wheels::layout::FixedLayoutSlice<'a, #elem_ty> {
-                                if self.bytes.len() == #offset {
-                                    return ::wheels::layout::FixedLayoutSlice::new(&[])
-                                        .expect("validated fixed-size layout Vec");
-                                }
-                                let len = #len_expr;
-                                let start = #offset + #len_width_lit;
-                                let end = start + (len * #elem_size);
-                                ::wheels::layout::FixedLayoutSlice::new(&self.bytes[start..end])
-                                    .expect("validated fixed-size layout Vec")
+                            ) -> ::wheels::layout::FlexibleVec<
+                                'a,
+                                #elem_ty,
+                                (),
+                                ::wheels::layout::FixedLayoutElement,
+                            > {
+                                ::wheels::layout::FlexibleVec::new_fixed_layout(
+                                    self.bytes,
+                                    #offset,
+                                    #len_width_lit,
+                                    #elem_size,
+                                )
+                                .expect("validated flexible Vec")
                             }
                         }),
+                    }
+                }
+            }
+        }
+    }
+
+    fn gen_view_mut_methods(
+        &self,
+        offset: proc_macro2::TokenStream,
+        offset_value: Option<usize>,
+        buffer_offset: BufferOffset,
+        field_ident: &Ident,
+    ) -> syn::Result<proc_macro2::TokenStream> {
+        let offset = quote!((#offset));
+        let field_mut_ident = format_ident!("{}_mut", field_ident);
+
+        match self {
+            Self::Value {
+                value,
+                optional: None,
+            } => {
+                if matches!(value, FixedValueKind::Bool { .. }) {
+                    Ok(quote! {
+                        pub fn #field_mut_ident(
+                            &mut self,
+                        ) -> core::result::Result<
+                            ::wheels::layout::LayoutBoolMut<'a, S>,
+                            ::pinocchio::error::ProgramError,
+                        > {
+                            ::wheels::layout::LayoutBoolMut::new(self.storage, #offset)
+                        }
+                    })
+                } else {
+                    let ty = value.ty();
+                    if can_mut_borrow_value(value, offset_value, buffer_offset) {
+                        Ok(quote! {
+                            pub fn #field_mut_ident(
+                                &mut self,
+                            ) -> core::result::Result<
+                                ::wheels::layout::LayoutValueMut<'a, S, #ty>,
+                                ::pinocchio::error::ProgramError,
+                            > {
+                                ::wheels::layout::LayoutValueMut::new(self.storage, #offset)
+                            }
+                        })
+                    } else {
+                        Ok(quote! {
+                            pub fn #field_mut_ident(
+                                &mut self,
+                            ) -> core::result::Result<
+                                ::wheels::layout::LayoutCopyMut<'a, S, #ty>,
+                                ::pinocchio::error::ProgramError,
+                            > {
+                                ::wheels::layout::LayoutCopyMut::new(self.storage, #offset)
+                            }
+                        })
+                    }
+                }
+            }
+            Self::Value {
+                value,
+                optional: Some(Optional::Fixed),
+            } => {
+                if matches!(value, FixedValueKind::Bool { .. }) {
+                    Ok(quote! {
+                        pub fn #field_mut_ident(
+                            &mut self,
+                        ) -> core::result::Result<
+                            ::wheels::layout::LayoutBoolOptionMut<'a, S>,
+                            ::pinocchio::error::ProgramError,
+                        > {
+                            ::wheels::layout::LayoutBoolOptionMut::new_fixed(
+                                self.storage,
+                                #offset,
+                            )
+                        }
+                    })
+                } else {
+                    let ty = value.ty();
+                    Ok(quote! {
+                        pub fn #field_mut_ident(
+                            &mut self,
+                        ) -> core::result::Result<
+                            ::wheels::layout::LayoutOptionMut<'a, S, #ty>,
+                            ::pinocchio::error::ProgramError,
+                        > {
+                            ::wheels::layout::LayoutOptionMut::new_fixed(
+                                self.storage,
+                                #offset,
+                            )
+                        }
+                    })
+                }
+            }
+            Self::Value {
+                value,
+                optional: Some(Optional::Flexible),
+            } => {
+                if matches!(value, FixedValueKind::Bool { .. }) {
+                    Ok(quote! {
+                        pub fn #field_mut_ident(
+                            &mut self,
+                        ) -> core::result::Result<
+                            ::wheels::layout::LayoutBoolOptionMut<'a, S>,
+                            ::pinocchio::error::ProgramError,
+                        > {
+                            ::wheels::layout::LayoutBoolOptionMut::new_flexible(
+                                self.storage,
+                                #offset,
+                            )
+                        }
+                    })
+                } else {
+                    let ty = value.ty();
+                    Ok(quote! {
+                        pub fn #field_mut_ident(
+                            &mut self,
+                        ) -> core::result::Result<
+                            ::wheels::layout::LayoutOptionMut<'a, S, #ty>,
+                            ::pinocchio::error::ProgramError,
+                        > {
+                            ::wheels::layout::LayoutOptionMut::new_flexible(
+                                self.storage,
+                                #offset,
+                            )
+                        }
+                    })
+                }
+            }
+            Self::Vec { elem, capacity } => {
+                let elem_ty = elem.ty();
+                let elem_size = elem.size_expr();
+                let marker = elem.flexible_marker();
+                let len_width_lit = capacity.len_width_lit();
+
+                match capacity {
+                    Capacity::Fixed { .. } => {
+                        let capacity_lit = capacity.max_capacity_lit();
+                        let new_storage_fn = elem.fixed_capacity_new_storage_fn();
+                        Ok(quote! {
+                            pub fn #field_mut_ident(
+                                &mut self,
+                            ) -> core::result::Result<
+                                ::wheels::layout::FixedCapacityVec<'a, #elem_ty, S, #marker>,
+                                ::pinocchio::error::ProgramError,
+                            > {
+                                ::wheels::layout::FixedCapacityVec::#new_storage_fn(
+                                    self.storage,
+                                    #offset,
+                                    #len_width_lit,
+                                    #elem_size,
+                                    #capacity_lit,
+                                )
+                            }
+                        })
+                    }
+                    Capacity::Flexible { .. } => {
+                        let new_storage_fn = elem.flexible_new_storage_fn();
+                        Ok(quote! {
+                            pub fn #field_mut_ident(
+                                &mut self,
+                            ) -> core::result::Result<
+                                ::wheels::layout::FlexibleVec<'a, #elem_ty, S, #marker>,
+                                ::pinocchio::error::ProgramError,
+                            > {
+                                ::wheels::layout::FlexibleVec::#new_storage_fn(
+                                    self.storage,
+                                    #offset,
+                                    #len_width_lit,
+                                    #elem_size,
+                                )
+                            }
+                        })
                     }
                 }
             }
@@ -1563,6 +1811,30 @@ fn accessor_ident(field_ident: &Ident) -> Ident {
     } else {
         format_ident!("{}", trimmed)
     }
+}
+
+fn can_mut_borrow_value(
+    value: &FixedValueKind,
+    offset: Option<usize>,
+    buffer_offset: BufferOffset,
+) -> bool {
+    if matches!(value, FixedValueKind::Bool { .. }) {
+        return false;
+    }
+
+    let align = value.align();
+    if align <= 1 {
+        return true;
+    }
+    if align > 8 {
+        return false;
+    }
+
+    let (Some(offset), BufferOffset::Fixed(buffer_offset)) = (offset, buffer_offset) else {
+        return false;
+    };
+
+    (buffer_offset + offset) % align == 0
 }
 
 fn value_alignment_check(

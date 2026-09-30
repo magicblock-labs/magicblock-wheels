@@ -42,7 +42,7 @@ where
     T: FixedSizeLayout,
 {
     pub fn new(bytes: &'a [u8]) -> Result<Self, DataLayoutError> {
-        if T::DATA_LEN == 0 || bytes.len() % T::DATA_LEN != 0 {
+        if T::DATA_LEN == 0 || !bytes.len().is_multiple_of(T::DATA_LEN) {
             return Err(DataLayoutError::InvalidDataLength);
         }
 

@@ -59,6 +59,12 @@ mod variable_offset_layout;
 ///     macro emits `MIN_DATA_LEN` and `MAX_DATA_LEN` instead of `DATA_LEN`.
 ///     These layouts do not implement `FixedSizeLayout`.
 ///
+///     For a trailing flexible Vec, canonical `encode()` output contains only
+///     active elements. `decode()` may also receive larger account/storage bytes
+///     and treats spare trailing bytes as Vec capacity. Generated getters return
+///     `FlexibleVec`, which exposes both active `len()` and storage
+///     `capacity()`.
+///
 /// Attributes
 /// ==========
 ///
@@ -101,13 +107,18 @@ mod variable_offset_layout;
 ///     - The encoded Vec length uses a 1-byte header when `N <= 255`, otherwise
 ///       a 2-byte header.
 ///     - Generated views expose an additional `<field>_capacity()` method.
+///     - Generated mutable views expose `<field>_mut()` returning
+///       `FixedCapacityVec`.
 ///
 ///   - `#[flexible = N]`
 ///
 ///     - Applicable only to the final field when that field is `Vec<T>`.
 ///     - `N` must be `1` or `2` and is the width, in bytes, of the encoded Vec
 ///       length header.
-///     - The field contributes only its active payload bytes to encoded length.
+///     - The field contributes only its active payload bytes to canonical
+///       encoded length.
+///     - Generated immutable getters return `FlexibleVec`.
+///     - Generated mutable views expose `<field>_mut()` returning `FlexibleVec`.
 ///
 ///   - `#[flexible]`
 ///
@@ -126,8 +137,9 @@ mod variable_offset_layout;
 ///   - Integer primitives, fixed-size arrays of integer primitives, and Vecs of
 ///     supported fixed-value element types are supported.
 ///   - `Vec<T>` for user-defined layout element types is supported when `T`
-///     implements `FixedSizeLayout`. Generated views return
-///     `FixedLayoutSlice<'_, T>`.
+///     implements `FixedSizeLayout`. Fixed-capacity generated views return
+///     `FixedLayoutSlice<'_, T>`. Final flexible Vec getters return
+///     `FlexibleVec`.
 ///
 /// APIs
 /// ====
@@ -142,9 +154,19 @@ mod variable_offset_layout;
 ///
 /// Trait APIs:
 ///   - all layouts implement `Encodable`
-///   - all layouts implement exact `Decodable`
+///   - all layouts implement `Decodable`; trailing-flexible Vec layouts decode
+///     the supplied final storage region, so spare trailing Vec capacity is
+///     accepted and exposed by the generated view
 ///   - constant-size layouts also implement `PrefixDecodable` and
 ///     `FixedSizeLayout`
+///
+/// Methods:
+///   - all layouts emit `decode_mut(storage: &impl LayoutStorageMut)`,
+///     returning a mutable storage-backed view
+///   - mutable views expose `<field>_mut()` helpers. Plain aligned POD fields
+///     return a mutable guard, encoded bool/Option fields return slot helpers,
+///     fixed-capacity Vec fields return `FixedCapacityVec`, and trailing
+///     flexible Vec fields return `FlexibleVec`.
 ///
 /// Import the relevant traits from `wheels::layout` to call `encode`,
 /// `encode_to`, `decode`, or `decode_prefix`. These APIs return
