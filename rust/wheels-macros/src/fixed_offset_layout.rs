@@ -13,7 +13,7 @@ use syn::{
 const FIELD_ATTRIBUTES: &[&str] = &["capacity", "extendable", "flexible"];
 const LAYOUT_NAME: &str = "fixed_offset_layout";
 const UNSUPPORTED_FIELD_MESSAGE: &str =
-    "fixed_offset_layout fields must be bool, Pubkey, integer primitives, or fixed-size arrays";
+    "fixed_offset_layout fields must be bool, Pubkey, integer primitives, fixed-size arrays, or a final Option<T> containing a supported layout";
 const INTEGER_FIELD_MESSAGE: &str = "field must be an integer primitive";
 
 const MAX_LEN_WIDTH: usize = 8;
@@ -200,11 +200,24 @@ pub(crate) fn expand_fixed_offset_layout(
                         }
                     }
                     ComptimeOptionalLen::Option { value_size } => {
-                        let value_size = usize_lit(*value_size);
                         quote! {
                             Ok(Self::MIN_DATA_LEN + self.#trailing_variable_field.as_ref().map(|_| 1 + #value_size).unwrap_or(0))
                         }
                     }
+                    ComptimeOptionalLen::NestedLayoutOption { ty } => quote! {
+                        match &self.#trailing_variable_field {
+                            Some(value) => {
+                                let value_len = ::wheels::layout::Encodable::encoded_len(value)?;
+                                if !(<#ty as ::wheels::layout::LayoutBounds>::MIN_DATA_LEN
+                                    ..=<#ty as ::wheels::layout::LayoutBounds>::MAX_DATA_LEN)
+                                    .contains(&value_len) {
+                                    return Err(::wheels::DataLayoutError::InvalidDataLength);
+                                }
+                                Ok(Self::MIN_DATA_LEN + 1 + value_len)
+                            }
+                            None => Ok(Self::MIN_DATA_LEN),
+                        }
+                    },
                 };
                 (
                     quote! {
@@ -557,6 +570,10 @@ enum FixedFieldKind {
         value: FixedValueKind,
         optional: Option<Optional>,
     },
+    NestedLayoutOption {
+        ty: Type,
+        optional: Optional,
+    },
     Vec {
         elem: FixedVecElementKind,
         capacity: Capacity,
@@ -634,7 +651,10 @@ enum ComptimeOptionalLen {
         elem_size: proc_macro2::TokenStream,
     },
     Option {
-        value_size: usize,
+        value_size: proc_macro2::TokenStream,
+    },
+    NestedLayoutOption {
+        ty: proc_macro2::TokenStream,
     },
 }
 
@@ -651,9 +671,9 @@ impl ComptimeOptionalLen {
                 let max_capacity = usize_lit(max_len_for_width(len_width_value));
                 quote!(#len_width + #max_capacity * #elem_size)
             }
-            ComptimeOptionalLen::Option { value_size } => {
-                let value_size = usize_lit(*value_size);
-                quote!(1usize + #value_size)
+            ComptimeOptionalLen::Option { value_size } => quote!(1usize + #value_size),
+            ComptimeOptionalLen::NestedLayoutOption { ty } => {
+                quote!(1usize + <#ty as ::wheels::layout::LayoutBounds>::MAX_DATA_LEN)
             }
         }
     }
@@ -675,7 +695,7 @@ impl FixedFieldKind {
                         value: Some(1 + value.size()),
                     }),
                     Some(Optional::Flexible) => Err(ComptimeOptionalLen::Option {
-                        value_size: value.size(),
+                        value_size: value_size_expr,
                     }),
                     None => Ok(SlotLen {
                         expr: value_size_expr,
@@ -683,6 +703,15 @@ impl FixedFieldKind {
                     }),
                 }
             }
+            Self::NestedLayoutOption { ty, optional } => match optional {
+                Optional::Fixed => Ok(SlotLen {
+                    expr: quote!((1usize + <#ty as ::wheels::layout::FixedSizeLayout>::DATA_LEN)),
+                    value: None,
+                }),
+                Optional::Flexible => {
+                    Err(ComptimeOptionalLen::NestedLayoutOption { ty: quote!(#ty) })
+                }
+            },
             Self::Vec { elem, capacity } => {
                 let elem_size_expr = elem.size_expr();
                 let len_width_lit = capacity.len_width_lit();
@@ -715,6 +744,16 @@ impl FixedFieldKind {
                     None
                 }
             }
+            Self::NestedLayoutOption {
+                ty,
+                optional: Optional::Fixed,
+            } => Some(quote!(#ty: ::wheels::layout::FixedSizeLayout)),
+            Self::NestedLayoutOption {
+                ty,
+                optional: Optional::Flexible,
+            } => Some(
+                quote!(#ty: ::wheels::layout::Encodable + ::wheels::layout::Decodable + ::wheels::layout::LayoutBounds),
+            ),
             Self::Vec { elem, .. } => {
                 if elem.needs_pod_bound() {
                     let ty = elem.ty();
@@ -802,6 +841,7 @@ impl FixedFieldKind {
                     error: syn::Error::new(field_ident.span(), message),
                 }))
             }
+            Self::NestedLayoutOption { .. } => Ok(None),
             Self::Vec { elem, capacity } => {
                 let FixedVecElementKind::FixedValue(elem) = elem else {
                     return Ok(None);
@@ -907,6 +947,39 @@ impl FixedFieldKind {
                     }
                 }
             }
+            Self::NestedLayoutOption {
+                ty,
+                optional: Optional::Fixed,
+            } => quote! {
+                Self::__validate_option(bytes, #offset_expr, #field_name)?;
+                if bytes[#offset_expr] != 0 {
+                    let start = #offset_expr + 1usize;
+                    let end = start + <#ty as ::wheels::layout::FixedSizeLayout>::DATA_LEN;
+                    let _ = <#ty as ::wheels::layout::Decodable>::decode(&bytes[start..end])?;
+                }
+            },
+            Self::NestedLayoutOption {
+                ty,
+                optional: Optional::Flexible,
+            } => quote! {
+                if bytes.len() != #offset_expr {
+                    if bytes.len() < #offset_expr + 1usize {
+                        return Err(::wheels::DataLayoutError::TruncatedPayload);
+                    }
+                    if bytes[#offset_expr] != 1 {
+                        return Err(::wheels::DataLayoutError::InvalidOptionTag);
+                    }
+                    let start = #offset_expr + 1usize;
+                    let value_len = bytes.len() - start;
+                    if value_len < <#ty as ::wheels::layout::LayoutBounds>::MIN_DATA_LEN {
+                        return Err(::wheels::DataLayoutError::TruncatedPayload);
+                    }
+                    if value_len > <#ty as ::wheels::layout::LayoutBounds>::MAX_DATA_LEN {
+                        return Err(::wheels::DataLayoutError::LengthExceedsCapacity);
+                    }
+                    let _ = <#ty as ::wheels::layout::Decodable>::decode(&bytes[start..])?;
+                }
+            },
             Self::Vec { elem, capacity } => {
                 let len_width_lit = capacity.len_width_lit();
                 let elem_size = elem.size_expr();
@@ -1035,6 +1108,48 @@ impl FixedFieldKind {
 
                             bytes[#offset..#offset + #len].copy_from_slice(::bytemuck::bytes_of(&self.#field_ident));
                         },
+                    },
+                }
+            }
+            Self::NestedLayoutOption { ty, optional } => {
+                let value_size = quote!(<#ty as ::wheels::layout::FixedSizeLayout>::DATA_LEN);
+                let encode_some = quote! {
+                    bytes[#offset] = 1;
+                    let start = #offset + 1usize;
+                    let end = start + #value_size;
+                    let remaining = ::wheels::layout::Encodable::encode_to(
+                        value,
+                        &mut bytes[start..end],
+                    )?;
+                    if !remaining.is_empty() {
+                        return Err(::wheels::DataLayoutError::InvalidDataLength);
+                    }
+                };
+                match optional {
+                    Optional::Fixed => quote! {
+                        #fields_encode_expr
+
+                        if let Some(value) = &self.#field_ident {
+                            #encode_some
+                        } else {
+                            bytes[#offset] = 0;
+                            bytes[#offset + 1usize..#offset + 1usize + #value_size].fill(0);
+                        }
+                    },
+                    Optional::Flexible => quote! {
+                        #fields_encode_expr
+
+                        if let Some(value) = &self.#field_ident {
+                            bytes[#offset] = 1;
+                            let start = #offset + 1usize;
+                            let remaining = ::wheels::layout::Encodable::encode_to(
+                                value,
+                                &mut bytes[start..],
+                            )?;
+                            if !remaining.is_empty() {
+                                return Err(::wheels::DataLayoutError::InvalidDataLength);
+                            }
+                        }
                     },
                 }
             }
@@ -1192,6 +1307,36 @@ impl FixedFieldKind {
                             }
                         })
                     }
+                }
+            }
+            Self::NestedLayoutOption { ty, optional } => {
+                let return_ty = quote!(
+                    core::option::Option<<#ty as ::wheels::layout::Decodable>::View<'a>>
+                );
+                match optional {
+                    Optional::Fixed => Ok(quote! {
+                        pub fn #field_ident(&self) -> #return_ty {
+                            (self.bytes[#offset] != 0).then(|| {
+                                let start = #offset + 1usize;
+                                let end = start + <#ty as ::wheels::layout::FixedSizeLayout>::DATA_LEN;
+                                <#ty as ::wheels::layout::Decodable>::decode(&self.bytes[start..end])
+                                    .expect("validated nested fixed-layout Option")
+                            })
+                        }
+                    }),
+                    Optional::Flexible => Ok(quote! {
+                        pub fn #field_ident(&self) -> #return_ty {
+                            if self.bytes.len() == #offset {
+                                return None;
+                            }
+                            Some(
+                                <#ty as ::wheels::layout::Decodable>::decode(
+                                    &self.bytes[#offset + 1usize..],
+                                )
+                                .expect("validated nested flexible Option"),
+                            )
+                        }
+                    }),
                 }
             }
             Self::Vec { elem, capacity } => {
@@ -1397,6 +1542,34 @@ impl FixedFieldKind {
                     })
                 }
             }
+            Self::NestedLayoutOption { ty, optional } => match optional {
+                Optional::Fixed => Ok(quote! {
+                    pub fn #field_mut_ident(
+                        &mut self,
+                    ) -> core::result::Result<
+                        ::wheels::layout::FixedLayoutOptionMut<'a, S, #ty>,
+                        ::pinocchio::error::ProgramError,
+                    > {
+                        ::wheels::layout::FixedLayoutOptionMut::new(
+                            self.storage,
+                            #offset,
+                        )
+                    }
+                }),
+                Optional::Flexible => Ok(quote! {
+                    pub fn #field_mut_ident(
+                        &mut self,
+                    ) -> core::result::Result<
+                        ::wheels::layout::FlexibleLayoutOptionMut<'a, S, #ty>,
+                        ::pinocchio::error::ProgramError,
+                    > {
+                        ::wheels::layout::FlexibleLayoutOptionMut::new(
+                            self.storage,
+                            #offset,
+                        )
+                    }
+                }),
+            },
             Self::Vec { elem, capacity } => {
                 let elem_ty = elem.ty();
                 let elem_size = elem.size_expr();
@@ -1523,10 +1696,20 @@ fn parse_field_layout(field: &syn::Field, is_last_field: bool) -> syn::Result<Fi
             ));
         }
 
-        return Ok(FixedFieldKind::Value {
-            value: parse_value_kind(inner, UNSUPPORTED_FIELD_MESSAGE)?,
-            optional: Some(optional),
-        });
+        return match parse_value_kind(inner, UNSUPPORTED_FIELD_MESSAGE) {
+            Ok(value) => Ok(FixedFieldKind::Value {
+                value,
+                optional: Some(optional),
+            }),
+            Err(_) if is_last_field => Ok(FixedFieldKind::NestedLayoutOption {
+                ty: inner.clone(),
+                optional,
+            }),
+            Err(_) => Err(syn::Error::new_spanned(
+                field,
+                "Option<T> containing a user-defined layout must be the final field",
+            )),
+        };
     }
 
     if attribute.is_some() {

@@ -142,6 +142,12 @@ mod variable_offset_layout;
 ///     implements `FixedSizeLayout`. Fixed-capacity generated views return
 ///     `FixedLayoutSlice<'_, T>`. Final extendable Vec getters return
 ///     `ExtendableVec`.
+///   - `Option<T>` for a user-defined layout type is supported as the final
+///     field. Without `#[flexible]`, `T` must implement `FixedSizeLayout` and
+///     the field reserves a tag and fixed-size payload. With `#[flexible]`,
+///     `T` may have a fixed or variable encoded size and must implement
+///     `Encodable`, `Decodable`, and `LayoutBounds`; `None` omits the field and
+///     `Some` uses the actual encoded payload length.
 ///
 /// APIs
 /// ====
@@ -167,6 +173,8 @@ mod variable_offset_layout;
 ///     returning a mutable storage-backed view
 ///   - mutable views expose `<field>_mut()` helpers. Plain aligned POD fields
 ///     return a mutable guard, encoded bool/Option fields return slot helpers,
+///     user-defined nested-layout options return `FixedLayoutOptionMut` or
+///     `FlexibleLayoutOptionMut`,
 ///     fixed-capacity Vec fields return `FixedCapacityVec`, and trailing
 ///     extendable Vec fields return `ExtendableVec`.
 ///
@@ -307,6 +315,10 @@ pub fn fixed_offset_layout(attr: TokenStream, item: TokenStream) -> TokenStream 
 ///     return `FixedLayoutSlice<'_, T>`. With `variable`, `T` must implement
 ///     `Encodable`, `PrefixDecodable`, and `LayoutBounds`, and generated views
 ///     return `VariableLayoutSlice<'_, T>`.
+///   - `Option<T>` for a user-defined layout type is supported when `T`
+///     implements `FixedSizeLayout`. It uses tagged encoding and may be
+///     followed by other fields because their offsets are computed at decode
+///     time. It is not supported with `option = implicit`.
 ///
 /// Field attributes:
 ///   - `#[flexible = N]`
