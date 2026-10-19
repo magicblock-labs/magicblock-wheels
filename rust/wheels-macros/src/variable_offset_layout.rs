@@ -18,7 +18,7 @@ use syn::{
 const FIELD_ATTRIBUTES: &[&str] = &["capacity", "extendable", "flexible", "element_size"];
 const LAYOUT_NAME: &str = "variable_offset_layout";
 const UNSUPPORTED_FIELD_MESSAGE: &str =
-    "variable_offset_layout fields must be bool, Pubkey, integer primitives, or fixed-size arrays of integer primitives";
+    "variable_offset_layout fields must be bool, Pubkey, integer primitives, fixed-size arrays of integer primitives, or tagged Option<T> where T implements FixedSizeLayout";
 const INTEGER_FIELD_MESSAGE: &str = "field must be an integer primitive or bool";
 
 const MAX_LEN_WIDTH: usize = 8;
@@ -421,6 +421,9 @@ enum FieldLayout {
         value: FixedValueKind,
         optional: OptionalKind,
     },
+    FixedLayoutOption {
+        ty: Type,
+    },
     Vec {
         elem: VecElementKind,
         flexible: Flexible,
@@ -490,6 +493,7 @@ impl FieldLayout {
     fn is_fixed(&self) -> bool {
         match self {
             FieldLayout::Value { optional, .. } => *optional == OptionalKind::No,
+            FieldLayout::FixedLayoutOption { .. } => false,
             FieldLayout::Vec { .. } => false,
         }
     }
@@ -508,6 +512,10 @@ impl FieldLayout {
                         Err(((quote!(0), Some(0)), (value_size_expr, Some(value.size()))))
                     }
                 }
+            }
+            Self::FixedLayoutOption { ty } => {
+                let value_size = quote!(<#ty as ::wheels::layout::FixedSizeLayout>::DATA_LEN);
+                Err(((quote!(1), Some(1)), (quote!(1 + #value_size), None)))
             }
             Self::Vec { elem, flexible } => {
                 let elem_size_expr = elem.size_expr();
@@ -539,6 +547,15 @@ impl FieldLayout {
                     OptionalKind::Implicit(_) => quote! {
                         len += if self.#field_ident.is_some() { #value_size } else { 0 };
                     },
+                }
+            }
+            Self::FixedLayoutOption { ty } => {
+                quote! {
+                    len += if self.#field_ident.is_some() {
+                        1 + <#ty as ::wheels::layout::FixedSizeLayout>::DATA_LEN
+                    } else {
+                        1
+                    };
                 }
             }
             Self::Vec { elem, flexible } => {
@@ -692,6 +709,48 @@ impl FieldLayout {
                     }
                 }
             }
+            Self::FixedLayoutOption { ty } => quote! {
+                if offset >= bytes.len() {
+                    ::pinocchio_log::log!(
+                        "Missing Option tag for field {} at offset {}",
+                        #field_name,
+                        offset,
+                    );
+                    return Err(::wheels::DataLayoutError::MissingOptionTag);
+                }
+
+                match bytes[offset] {
+                    0 => {
+                        offset += 1;
+                    }
+                    1 => {
+                        let data_offset = offset + 1;
+                        let end = data_offset
+                            + <#ty as ::wheels::layout::FixedSizeLayout>::DATA_LEN;
+                        if end > bytes.len() {
+                            ::pinocchio_log::log!(
+                                "Truncated payload for field {}: need {} bytes, have {}",
+                                #field_name,
+                                end,
+                                bytes.len(),
+                            );
+                            return Err(::wheels::DataLayoutError::TruncatedPayload);
+                        }
+                        let _ = <#ty as ::wheels::layout::Decodable>::decode(
+                            &bytes[data_offset..end],
+                        )?;
+                        offset = end;
+                    }
+                    tag => {
+                        ::pinocchio_log::log!(
+                            "Invalid Option tag for field {}: tag = {}",
+                            #field_name,
+                            tag,
+                        );
+                        return Err(::wheels::DataLayoutError::InvalidOptionTag);
+                    }
+                }
+            },
             Self::Vec { elem, flexible } => {
                 let len_width_lit = usize_lit(flexible.len_width);
                 let len_expr = checked_read_len_expr(
@@ -857,6 +916,24 @@ impl FieldLayout {
                     },
                 }
             }
+            Self::FixedLayoutOption { ty } => quote! {
+                if let core::option::Option::Some(value) = &self.#field_ident {
+                    bytes[offset] = 1;
+                    let start = offset + 1;
+                    let end = start + <#ty as ::wheels::layout::FixedSizeLayout>::DATA_LEN;
+                    let remaining = ::wheels::layout::Encodable::encode_to(
+                        value,
+                        &mut bytes[start..end],
+                    )?;
+                    if !remaining.is_empty() {
+                        return Err(::wheels::DataLayoutError::InvalidDataLength);
+                    }
+                    offset = end;
+                } else {
+                    bytes[offset] = 0;
+                    offset += 1;
+                }
+            },
             Self::Vec { elem, flexible } => {
                 let len_width = usize_lit(flexible.len_width);
                 match elem {
@@ -934,6 +1011,7 @@ impl FieldLayout {
                     None
                 }
             }
+            Self::FixedLayoutOption { ty } => Some(quote!(#ty: ::wheels::layout::FixedSizeLayout)),
             Self::Vec { elem, .. } => {
                 let ty = elem.ty();
                 match elem {
@@ -1239,6 +1317,29 @@ impl FieldLayout {
                     }
                 }
             }
+            Self::FixedLayoutOption { ty } => {
+                let offset_expr = find_data_offset(struct_name, field_offsets);
+                Ok(quote! {
+                    pub fn #field_ident(
+                        &self,
+                    ) -> core::option::Option<
+                        <#ty as ::wheels::layout::Decodable>::View<'a>,
+                    > {
+                        let offset = #offset_expr;
+                        if self.bytes[offset] == 0 {
+                            return None;
+                        }
+                        let start = offset + 1;
+                        let end = start + <#ty as ::wheels::layout::FixedSizeLayout>::DATA_LEN;
+                        Some(
+                            <#ty as ::wheels::layout::Decodable>::decode(
+                                &self.bytes[start..end],
+                            )
+                            .expect("validated nested fixed-layout Option"),
+                        )
+                    }
+                })
+            }
             Self::Vec { elem, flexible } => {
                 let elem_ty = elem.ty();
                 let elem_size = elem.size_expr();
@@ -1381,17 +1482,26 @@ fn parse_field_layout(
             ));
         }
 
-        return Ok(FieldLayout::Value {
-            value: parse_value_kind(inner, UNSUPPORTED_FIELD_MESSAGE)?,
-            optional: match option_encoding {
-                StructOptionEncoding::Tagged => OptionalKind::Tagged,
-                StructOptionEncoding::Implicit => {
-                    let index = *implicit_option_index;
-                    *implicit_option_index += 1;
-                    OptionalKind::Implicit(index)
-                }
-            },
-        });
+        return match parse_value_kind(inner, UNSUPPORTED_FIELD_MESSAGE) {
+            Ok(value) => Ok(FieldLayout::Value {
+                value,
+                optional: match option_encoding {
+                    StructOptionEncoding::Tagged => OptionalKind::Tagged,
+                    StructOptionEncoding::Implicit => {
+                        let index = *implicit_option_index;
+                        *implicit_option_index += 1;
+                        OptionalKind::Implicit(index)
+                    }
+                },
+            }),
+            Err(_) if option_encoding == StructOptionEncoding::Tagged => {
+                Ok(FieldLayout::FixedLayoutOption { ty: inner.clone() })
+            }
+            Err(_) => Err(syn::Error::new_spanned(
+                field,
+                "Option<T> with a user-defined fixed-size layout requires tagged Option encoding",
+            )),
+        };
     }
 
     if !attribute.is_empty() {
@@ -1700,6 +1810,7 @@ fn exact_data_lens(layouts: &[FieldLayout]) -> Option<Vec<usize>> {
                 OptionalKind::Tagged => BTreeSet::from([1, 1 + value.size()]),
                 OptionalKind::Implicit(_) => BTreeSet::from([0, value.size()]),
             },
+            FieldLayout::FixedLayoutOption { .. } => return None,
             FieldLayout::Vec { .. } => return None,
         };
 
@@ -2032,6 +2143,7 @@ fn borrowed_requirement(layout: &FieldLayout) -> Option<BorrowedRequirement> {
                 optional_kind: *optional,
             }),
         },
+        FieldLayout::FixedLayoutOption { .. } => None,
         FieldLayout::Vec { elem, flexible } => elem
             .borrowed_slice_alignment()
             .filter(|align| *align > 1)
@@ -2087,6 +2199,7 @@ fn possible_len_residues(layout: &FieldLayout, modulus: usize) -> BTreeSet<usize
             OptionalKind::Tagged => BTreeSet::from([1 % modulus, (1 + value.size()) % modulus]),
             OptionalKind::Implicit(_) => BTreeSet::from([0, value.size() % modulus]),
         },
+        FieldLayout::FixedLayoutOption { .. } => (0..modulus).collect(),
         FieldLayout::Vec { elem, flexible } => {
             let Some(elem_size) = elem.known_size() else {
                 return (0..modulus).collect();
@@ -2285,6 +2398,15 @@ fn advance_offset_expr(
                 }
             }
         }
+        FieldLayout::FixedLayoutOption { ty } => quote! {{
+            let offset = #expr;
+            offset
+                + if self.bytes[offset] == 0 {
+                    1
+                } else {
+                    1 + <#ty as ::wheels::layout::FixedSizeLayout>::DATA_LEN
+                }
+        }},
         FieldLayout::Vec { elem, flexible } => {
             let len_width = usize_lit(flexible.len_width);
             let len_expr = validated_len_expr(
