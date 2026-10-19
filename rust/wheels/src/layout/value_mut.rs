@@ -6,7 +6,7 @@ use core::{
 use bytemuck::Pod;
 use pinocchio::error::ProgramError;
 
-use super::LayoutStorageMut;
+use super::{Encodable, FixedSizeLayout, LayoutBounds, LayoutStorageMut};
 use crate::DataLayoutError;
 
 // CHECKPOINT(CU): generated fixed-layout getters pass compile-time constant
@@ -270,6 +270,123 @@ where
         let mut bytes = self.storage.borrow_data_mut()?;
         ensure_range(&bytes, self.offset, 1)?;
         bytes[self.offset] = 0;
+        Ok(())
+    }
+}
+
+/// Mutable slot for an `Option<T>` whose payload is a fixed-size layout.
+///
+/// Nested layouts are encoded field-by-field, so this helper replaces the
+/// complete nested value instead of treating its Rust representation as bytes.
+pub struct FixedLayoutOptionMut<'a, S, T>
+where
+    S: LayoutStorageMut + ?Sized,
+    T: FixedSizeLayout,
+{
+    storage: &'a S,
+    offset: usize,
+    _marker: PhantomData<T>,
+}
+
+impl<'a, S, T> FixedLayoutOptionMut<'a, S, T>
+where
+    S: LayoutStorageMut + ?Sized,
+    T: FixedSizeLayout,
+{
+    #[doc(hidden)]
+    pub fn new(storage: &'a S, offset: usize) -> Result<Self, ProgramError> {
+        let bytes = storage.borrow_data()?;
+        ensure_range(&bytes, offset, 1 + T::DATA_LEN)?;
+        drop(bytes);
+
+        Ok(Self {
+            storage,
+            offset,
+            _marker: PhantomData,
+        })
+    }
+
+    pub fn set(&mut self, value: Option<&T>) -> Result<(), ProgramError> {
+        match value {
+            Some(value) => self.set_some(value),
+            None => self.set_none(),
+        }
+    }
+
+    fn set_some(&mut self, value: &T) -> Result<(), ProgramError> {
+        let start = self.offset + 1;
+        let end = checked_end(start, T::DATA_LEN)?;
+        let mut bytes = self.storage.borrow_data_mut()?;
+        ensure_range(&bytes, self.offset, 1 + T::DATA_LEN)?;
+        let remaining = value
+            .encode_to(&mut bytes[start..end])
+            .map_err(ProgramError::from)?;
+        if !remaining.is_empty() {
+            return Err(DataLayoutError::InvalidDataLength.into());
+        }
+        bytes[self.offset] = 1;
+        Ok(())
+    }
+
+    fn set_none(&mut self) -> Result<(), ProgramError> {
+        let mut bytes = self.storage.borrow_data_mut()?;
+        ensure_range(&bytes, self.offset, 1)?;
+        bytes[self.offset] = 0;
+        Ok(())
+    }
+}
+
+/// Mutable slot for a final flexible `Option<T>` containing a nested layout.
+pub struct FlexibleLayoutOptionMut<'a, S, T>
+where
+    S: LayoutStorageMut + ?Sized,
+    T: Encodable + LayoutBounds,
+{
+    storage: &'a S,
+    offset: usize,
+    _marker: PhantomData<T>,
+}
+
+impl<'a, S, T> FlexibleLayoutOptionMut<'a, S, T>
+where
+    S: LayoutStorageMut + ?Sized,
+    T: Encodable + LayoutBounds,
+{
+    #[doc(hidden)]
+    pub fn new(storage: &'a S, offset: usize) -> Result<Self, ProgramError> {
+        if storage.data_len() < offset {
+            return Err(DataLayoutError::InvalidDataLength.into());
+        }
+        Ok(Self {
+            storage,
+            offset,
+            _marker: PhantomData,
+        })
+    }
+
+    pub fn set(&mut self, value: Option<&T>) -> Result<(), ProgramError> {
+        let Some(value) = value else {
+            return self.storage.resize(self.offset);
+        };
+
+        let value_len = value.encoded_len().map_err(ProgramError::from)?;
+        if !(T::MIN_DATA_LEN..=T::MAX_DATA_LEN).contains(&value_len) {
+            return Err(DataLayoutError::InvalidDataLength.into());
+        }
+
+        let start = checked_end(self.offset, 1)?;
+        let end = checked_end(start, value_len)?;
+        self.storage.resize(end)?;
+
+        let mut bytes = self.storage.borrow_data_mut()?;
+        ensure_range(&bytes, self.offset, 1 + value_len)?;
+        let remaining = value
+            .encode_to(&mut bytes[start..end])
+            .map_err(ProgramError::from)?;
+        if !remaining.is_empty() {
+            return Err(DataLayoutError::InvalidDataLength.into());
+        }
+        bytes[self.offset] = 1;
         Ok(())
     }
 }

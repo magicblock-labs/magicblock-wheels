@@ -190,6 +190,77 @@ struct FixedVerifierEntry {
     weight: u64,
 }
 
+#[variable_offset_layout(buffer_offset = 0)]
+struct NestedFixedOptionArgs {
+    header: u8,
+    config: Option<FixedVerifierEntry>,
+    checksum: u16,
+}
+
+#[test]
+fn variable_layout_supports_tagged_nested_fixed_option() {
+    assert_eq!(NestedFixedOptionArgs::DATA_LEN_RANGE, (4, 76));
+
+    let none = NestedFixedOptionArgs {
+        header: 3,
+        config: None,
+        checksum: 0xBEEF,
+    }
+    .encode()
+    .unwrap();
+    assert_eq!(
+        none,
+        [vec![3, 0], 0xBEEF_u16.to_le_bytes().to_vec()].concat()
+    );
+
+    let config = FixedVerifierEntry {
+        verifier_identity: Pubkey::from([1; 32]),
+        verifier_bond: Pubkey::from([2; 32]),
+        weight: 11,
+    };
+    let some = NestedFixedOptionArgs {
+        header: 3,
+        config: Some(config.clone()),
+        checksum: 0xBEEF,
+    }
+    .encode()
+    .unwrap();
+    let mut framed = some.clone();
+    framed.extend_from_slice(&[9, 10]);
+    let (view, remaining) = NestedFixedOptionArgs::decode_prefix(&framed).unwrap();
+    let config_view = view.config().unwrap();
+
+    assert_eq!(view.header(), 3);
+    assert_eq!(config_view.verifier_identity(), &config.verifier_identity);
+    assert_eq!(config_view.verifier_bond(), &config.verifier_bond);
+    assert_eq!(config_view.weight(), config.weight);
+    assert_eq!(view.checksum(), 0xBEEF);
+    assert_eq!(remaining, &[9, 10]);
+}
+
+#[test]
+fn variable_layout_rejects_invalid_nested_option_encoding() {
+    let mut bytes = NestedFixedOptionArgs {
+        header: 3,
+        config: None,
+        checksum: 0xBEEF,
+    }
+    .encode()
+    .unwrap();
+    bytes[1] = 2;
+
+    assert_eq!(
+        NestedFixedOptionArgs::decode(&bytes).unwrap_err(),
+        DataLayoutError::InvalidOptionTag
+    );
+
+    bytes[1] = 1;
+    assert_eq!(
+        NestedFixedOptionArgs::decode(&bytes).unwrap_err(),
+        DataLayoutError::TruncatedPayload
+    );
+}
+
 #[variable_offset_layout(buffer_offset = unknown)]
 struct FixedEntryRegistryArgs {
     registry_revision: u64,

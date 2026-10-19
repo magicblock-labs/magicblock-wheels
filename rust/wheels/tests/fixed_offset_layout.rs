@@ -566,6 +566,208 @@ struct FixedTrailingOptionArgs {
     delegate: Option<Pubkey>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[fixed_offset_layout(buffer_offset = unknown)]
+struct NestedFixedConfig {
+    authority: Pubkey,
+    threshold: u16,
+    enabled: bool,
+}
+
+#[fixed_offset_layout(buffer_offset = 0)]
+struct FixedNestedOptionArgs {
+    header: u8,
+    config: Option<NestedFixedConfig>,
+}
+
+#[fixed_offset_layout(buffer_offset = 0)]
+struct FlexibleNestedOptionArgs {
+    header: u8,
+    #[flexible]
+    config: Option<NestedFixedConfig>,
+}
+
+#[fixed_offset_layout(buffer_offset = unknown)]
+struct NestedVariableConfig {
+    version: u8,
+    #[extendable = 1]
+    payload: Vec<u8>,
+}
+
+#[fixed_offset_layout(buffer_offset = 0)]
+struct FlexibleVariableNestedOptionArgs {
+    header: u8,
+    #[flexible]
+    config: Option<NestedVariableConfig>,
+}
+
+#[test]
+fn fixed_offset_layout_supports_flexible_variable_nested_option() {
+    assert_eq!(FlexibleVariableNestedOptionArgs::MIN_DATA_LEN, 1);
+    assert_eq!(FlexibleVariableNestedOptionArgs::MAX_DATA_LEN, 259);
+
+    let storage = TestStorage::new(
+        FlexibleVariableNestedOptionArgs {
+            header: 7,
+            config: None,
+        }
+        .encode()
+        .unwrap(),
+    );
+    let config = NestedVariableConfig {
+        version: 3,
+        payload: vec![9, 8, 7],
+    };
+
+    assert_eq!(
+        FlexibleVariableNestedOptionArgs {
+            header: 7,
+            config: Some(NestedVariableConfig {
+                version: 3,
+                payload: vec![9, 8, 7],
+            }),
+        }
+        .encode()
+        .unwrap(),
+        vec![7, 1, 3, 3, 9, 8, 7],
+    );
+
+    {
+        let mut view = FlexibleVariableNestedOptionArgs::decode_mut(&storage).unwrap();
+        view.config_mut().unwrap().set(Some(&config)).unwrap();
+    }
+    {
+        let bytes = storage.bytes();
+        let aligned = aligned_copy::<16>(&bytes);
+        let view = FlexibleVariableNestedOptionArgs::decode(&aligned.0[..bytes.len()]).unwrap();
+        let config_view = view.config().unwrap();
+
+        assert_eq!(config_view.version(), 3);
+        assert_eq!(config_view.payload().as_slice(), &[9, 8, 7]);
+    }
+
+    let shorter = NestedVariableConfig {
+        version: 4,
+        payload: vec![5],
+    };
+    {
+        let mut view = FlexibleVariableNestedOptionArgs::decode_mut(&storage).unwrap();
+        view.config_mut().unwrap().set(Some(&shorter)).unwrap();
+    }
+    assert_eq!(storage.bytes(), vec![7, 1, 4, 1, 5]);
+
+    {
+        let mut view = FlexibleVariableNestedOptionArgs::decode_mut(&storage).unwrap();
+        view.config_mut().unwrap().set(None).unwrap();
+    }
+    assert_eq!(storage.bytes(), vec![7]);
+    assert_eq!(storage.resize_lens(), vec![7, 5, 1]);
+}
+
+#[test]
+fn fixed_offset_layout_rejects_invalid_flexible_nested_option() {
+    for (bytes, expected_error) in [
+        (vec![7, 0, 3, 1, 9], DataLayoutError::InvalidOptionTag),
+        (vec![7, 1, 3, 3, 9], DataLayoutError::LengthExceedsCapacity),
+        (vec![7; 260], DataLayoutError::InvalidDataLength),
+    ] {
+        let aligned = aligned_copy::<264>(&bytes);
+        assert_eq!(
+            FlexibleVariableNestedOptionArgs::decode(&aligned.0[..bytes.len()]).unwrap_err(),
+            expected_error,
+        );
+    }
+}
+
+#[test]
+fn fixed_offset_layout_supports_fixed_nested_option() {
+    assert_eq!(NestedFixedConfig::DATA_LEN, 35);
+    assert_eq!(FixedNestedOptionArgs::DATA_LEN, 37);
+
+    let none = FixedNestedOptionArgs {
+        header: 7,
+        config: None,
+    }
+    .encode()
+    .unwrap();
+    assert_eq!(none.len(), FixedNestedOptionArgs::DATA_LEN);
+    assert_eq!(&none[..2], &[7, 0]);
+    assert!(none[2..].iter().all(|byte| *byte == 0));
+
+    let config = NestedFixedConfig {
+        authority: Pubkey::from([4; 32]),
+        threshold: 9,
+        enabled: true,
+    };
+    let some = FixedNestedOptionArgs {
+        header: 7,
+        config: Some(config.clone()),
+    }
+    .encode()
+    .unwrap();
+    let aligned = aligned_copy::<64>(&some);
+    let view = FixedNestedOptionArgs::decode(&aligned.0[..some.len()]).unwrap();
+    let config_view = view.config().unwrap();
+
+    assert_eq!(view.header(), 7);
+    assert_eq!(config_view.authority(), &config.authority);
+    assert_eq!(config_view.threshold(), config.threshold);
+    assert_eq!(config_view.enabled(), config.enabled);
+}
+
+#[test]
+fn fixed_offset_layout_supports_mutable_flexible_nested_option() {
+    assert_eq!(FlexibleNestedOptionArgs::MIN_DATA_LEN, 1);
+    assert_eq!(FlexibleNestedOptionArgs::MAX_DATA_LEN, 37);
+
+    let storage = TestStorage::new(
+        FlexibleNestedOptionArgs {
+            header: 3,
+            config: None,
+        }
+        .encode()
+        .unwrap(),
+    );
+    let config = NestedFixedConfig {
+        authority: Pubkey::from([8; 32]),
+        threshold: 11,
+        enabled: true,
+    };
+
+    {
+        let mut view = FlexibleNestedOptionArgs::decode_mut(&storage).unwrap();
+        view.config_mut().unwrap().set(Some(&config)).unwrap();
+    }
+
+    assert_eq!(
+        storage.resize_lens(),
+        vec![FlexibleNestedOptionArgs::MAX_DATA_LEN]
+    );
+    {
+        let bytes = storage.bytes();
+        let aligned = aligned_copy::<64>(&bytes);
+        let view = FlexibleNestedOptionArgs::decode(&aligned.0[..bytes.len()]).unwrap();
+        let config_view = view.config().unwrap();
+        assert_eq!(config_view.authority(), &config.authority);
+        assert_eq!(config_view.threshold(), config.threshold);
+        assert!(config_view.enabled());
+    }
+
+    {
+        let mut view = FlexibleNestedOptionArgs::decode_mut(&storage).unwrap();
+        view.config_mut().unwrap().set(None).unwrap();
+    }
+
+    assert_eq!(storage.bytes(), vec![3]);
+    assert_eq!(
+        storage.resize_lens(),
+        vec![
+            FlexibleNestedOptionArgs::MAX_DATA_LEN,
+            FlexibleNestedOptionArgs::MIN_DATA_LEN,
+        ]
+    );
+}
+
 #[test]
 fn fixed_offset_layout_supports_pubkey_and_trailing_flexible_option() {
     assert_eq!(FixedTrailingOptionArgs::MIN_DATA_LEN, 34);
