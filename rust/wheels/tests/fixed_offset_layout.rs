@@ -1,12 +1,24 @@
 extern crate alloc;
 
-use pinocchio::{error::ProgramError, Address};
-use wheels::{fixed_offset_layout, Pubkey};
+use pinocchio::Address;
+use wheels::{
+    fixed_offset_layout,
+    layout::{Decodable, Encodable, PrefixDecodable},
+    DataLayoutError, Pubkey,
+};
 
 #[repr(align(8))]
 struct Aligned<const N: usize>([u8; N]);
 
-#[fixed_offset_layout]
+fn aligned_copy<const N: usize>(bytes: &[u8]) -> Aligned<N> {
+    assert!(bytes.len() <= N);
+
+    let mut aligned = Aligned([0; N]);
+    aligned.0[..bytes.len()].copy_from_slice(bytes);
+    aligned
+}
+
+#[fixed_offset_layout(buffer_offset = 0)]
 struct PrivateTransferFixedArgs {
     shuttle_id: u32,
     amount: u64,
@@ -48,7 +60,20 @@ fn fixed_offset_layout_reserves_constant_space() {
     assert_eq!(view.encrypted_destination_capacity(), 72);
     assert_eq!(view.checksum(), 0xBEEF);
 
-    assert_eq!(value.encode(), Ok(aligned.0));
+    assert_eq!(value.encode().unwrap(), aligned.0.to_vec());
+
+    let mut framed = Aligned([0; PrivateTransferFixedArgs::DATA_LEN + 3]);
+    let remaining_len = value.encode_to(&mut framed.0).unwrap().len();
+    assert_eq!(remaining_len, 3);
+    assert_eq!(
+        &framed.0[..PrivateTransferFixedArgs::DATA_LEN],
+        aligned.0.as_slice()
+    );
+
+    framed.0[PrivateTransferFixedArgs::DATA_LEN..].copy_from_slice(&[9, 8, 7]);
+    let (view, remaining) = PrivateTransferFixedArgs::decode_prefix(&framed.0).unwrap();
+    assert_eq!(view.shuttle_id(), 100);
+    assert_eq!(remaining, &[9, 8, 7]);
 }
 
 #[test]
@@ -58,11 +83,11 @@ fn fixed_offset_layout_rejects_invalid_vec_len() {
 
     assert_eq!(
         PrivateTransferFixedArgs::decode(&aligned.0).unwrap_err(),
-        ProgramError::InvalidInstructionData
+        DataLayoutError::LengthExceedsCapacity
     );
 }
 
-#[fixed_offset_layout]
+#[fixed_offset_layout(buffer_offset = 0)]
 struct FixedTrailingVecArgs {
     header: u16,
     #[capacity = 4]
@@ -94,14 +119,49 @@ fn fixed_offset_layout_supports_trailing_flexible_vec() {
         .concat()
     );
 
-    let view = FixedTrailingVecArgs::decode(&encoded).unwrap();
+    let aligned = aligned_copy::<64>(&encoded);
+    let view = FixedTrailingVecArgs::decode(&aligned.0[..encoded.len()]).unwrap();
     assert_eq!(view.header(), 7);
     assert_eq!(view.reserved(), &[1, 2]);
     assert_eq!(view.reserved_capacity(), 4);
     assert_eq!(view.tail(), &[9, 8, 7]);
+
+    let empty_tail = FixedTrailingVecArgs {
+        header: 7,
+        reserved: vec![1, 2],
+        tail: vec![],
+    };
+    let empty_encoded = empty_tail.encode().unwrap();
+    assert_eq!(
+        empty_encoded,
+        [7_u16.to_le_bytes().as_slice(), &[2, 1, 2, 0, 0],].concat()
+    );
+
+    let aligned = aligned_copy::<64>(&empty_encoded);
+    let view = FixedTrailingVecArgs::decode(&aligned.0[..empty_encoded.len()]).unwrap();
+    assert_eq!(view.tail(), &[]);
 }
 
-#[fixed_offset_layout]
+#[test]
+fn fixed_offset_layout_rejects_invalid_trailing_flexible_vec_encoding() {
+    let base = [7_u16.to_le_bytes().as_slice(), &[0, 0, 0, 0, 0]].concat();
+
+    let zero_len_header = [base.as_slice(), 0_u16.to_le_bytes().as_slice()].concat();
+    let aligned = aligned_copy::<64>(&zero_len_header);
+    assert_eq!(
+        FixedTrailingVecArgs::decode(&aligned.0[..zero_len_header.len()]).unwrap_err(),
+        DataLayoutError::InvalidDataLength
+    );
+
+    let truncated_payload = [base.as_slice(), 3_u16.to_le_bytes().as_slice(), &[9]].concat();
+    let aligned = aligned_copy::<64>(&truncated_payload);
+    assert_eq!(
+        FixedTrailingVecArgs::decode(&aligned.0[..truncated_payload.len()]).unwrap_err(),
+        DataLayoutError::TruncatedVectorPayload
+    );
+}
+
+#[fixed_offset_layout(buffer_offset = 0)]
 struct FixedTrailingOptionArgs {
     header: u16,
     authority: Address,
@@ -120,10 +180,14 @@ fn fixed_offset_layout_supports_pubkey_and_trailing_flexible_option() {
         authority: Pubkey::from([3; 32]),
         delegate: None,
     };
+    let none_encoded = none_value.encode().unwrap();
     assert_eq!(
-        none_value.encode().unwrap(),
+        none_encoded,
         [9_u16.to_le_bytes().as_slice(), &[3; 32]].concat()
     );
+    let aligned = aligned_copy::<96>(&none_encoded);
+    let view = FixedTrailingOptionArgs::decode(&aligned.0[..none_encoded.len()]).unwrap();
+    assert_eq!(view.delegate(), None);
 
     let some_value = FixedTrailingOptionArgs {
         header: 9,
@@ -136,13 +200,33 @@ fn fixed_offset_layout_supports_pubkey_and_trailing_flexible_option() {
         [9_u16.to_le_bytes().as_slice(), &[3; 32], &[1], &[4; 32],].concat()
     );
 
-    let view = FixedTrailingOptionArgs::decode(&encoded).unwrap();
+    let aligned = aligned_copy::<96>(&encoded);
+    let view = FixedTrailingOptionArgs::decode(&aligned.0[..encoded.len()]).unwrap();
     assert_eq!(view.header(), 9);
     assert_eq!(view.authority(), &Pubkey::from([3; 32]));
     assert_eq!(view.delegate(), Some(&Pubkey::from([4; 32])));
 }
 
-#[fixed_offset_layout]
+#[test]
+fn fixed_offset_layout_rejects_invalid_trailing_flexible_option_encoding() {
+    let base = [9_u16.to_le_bytes().as_slice(), &[3; 32]].concat();
+
+    let tagged_none = [base.as_slice(), &[0], &[4; 32]].concat();
+    let aligned = aligned_copy::<96>(&tagged_none);
+    assert_eq!(
+        FixedTrailingOptionArgs::decode(&aligned.0[..tagged_none.len()]).unwrap_err(),
+        DataLayoutError::InvalidOptionTag
+    );
+
+    let truncated_some = [base.as_slice(), &[1], &[4; 8]].concat();
+    let aligned = aligned_copy::<96>(&truncated_some);
+    assert_eq!(
+        FixedTrailingOptionArgs::decode(&aligned.0[..truncated_some.len()]).unwrap_err(),
+        DataLayoutError::TruncatedPayload
+    );
+}
+
+#[fixed_offset_layout(buffer_offset = 0)]
 struct FixedBoolAndAddressArgs {
     enabled: bool,
     owner: Address,
@@ -172,7 +256,29 @@ fn fixed_offset_layout_supports_bool_and_address() {
     assert_eq!(view.sponsored(), Some(false));
 }
 
-#[fixed_offset_layout]
+#[fixed_offset_layout(buffer_offset = 1)]
+struct FixedOffsetOneCopyArgs {
+    amount: u64,
+    counter: u32,
+}
+
+#[test]
+fn fixed_offset_layout_validates_buffer_offset() {
+    let mut aligned = Aligned([0; FixedOffsetOneCopyArgs::DATA_LEN + 1]);
+    let bytes = &mut aligned.0;
+    bytes[1..9].copy_from_slice(&55_u64.to_le_bytes());
+    bytes[9..13].copy_from_slice(&7_u32.to_le_bytes());
+
+    let view = FixedOffsetOneCopyArgs::decode(&bytes[1..]).unwrap();
+    assert_eq!(view.amount(), 55);
+    assert_eq!(view.counter(), 7);
+    assert_eq!(
+        FixedOffsetOneCopyArgs::decode(&bytes[..FixedOffsetOneCopyArgs::DATA_LEN]).unwrap_err(),
+        DataLayoutError::InvalidBufferOffset
+    );
+}
+
+#[fixed_offset_layout(buffer_offset = 0)]
 struct FixedAddressVecArgs {
     tag: u8,
     #[capacity = 2]
@@ -209,4 +315,156 @@ fn fixed_offset_layout_supports_address_vec() {
     assert_eq!(view.owners(), owners.as_slice());
     assert_eq!(view.owners_capacity(), 2);
     assert_eq!(view.checksum(), 0xBEEF);
+}
+
+#[fixed_offset_layout(buffer_offset = unaligned)]
+#[derive(Clone)]
+struct FixedEntry {
+    id: u16,
+    enabled: Option<bool>,
+}
+
+#[fixed_offset_layout(buffer_offset = 0)]
+struct FixedEntryVecArgs {
+    tag: u8,
+    #[capacity = 3]
+    entries: Vec<FixedEntry>,
+    checksum: u16,
+}
+
+#[test]
+fn fixed_offset_layout_supports_fixed_layout_vec() {
+    assert_eq!(FixedEntry::DATA_LEN, 4);
+    assert_eq!(FixedEntryVecArgs::DATA_LEN, 16);
+    assert_eq!(FixedEntryVecArgs::OFFSETS, [0, 1, 14]);
+
+    let value = FixedEntryVecArgs {
+        tag: 9,
+        entries: vec![
+            FixedEntry {
+                id: 0x0102,
+                enabled: Some(true),
+            },
+            FixedEntry {
+                id: 0x0304,
+                enabled: None,
+            },
+        ],
+        checksum: 0xBEEF,
+    };
+    let encoded = value.encode().unwrap();
+    let expected = [
+        [9, 2].as_slice(),
+        &[0x02, 0x01, 1, 1],
+        &[0x04, 0x03, 0, 0],
+        &[0, 0, 0, 0],
+        0xBEEF_u16.to_le_bytes().as_slice(),
+    ]
+    .concat();
+    assert_eq!(encoded.as_slice(), expected.as_slice());
+
+    let mut aligned = Aligned([0; FixedEntryVecArgs::DATA_LEN]);
+    aligned.0.copy_from_slice(&encoded);
+
+    let view = FixedEntryVecArgs::decode(&aligned.0).unwrap();
+    assert_eq!(view.tag(), 9);
+    assert_eq!(view.entries_capacity(), 3);
+    assert_eq!(view.checksum(), 0xBEEF);
+
+    let entries: wheels::layout::FixedLayoutSlice<'_, FixedEntry> = view.entries();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.get(0).unwrap().id(), 0x0102);
+    assert_eq!(entries.get(0).unwrap().enabled(), Some(true));
+    assert_eq!(entries.get(1).unwrap().id(), 0x0304);
+    assert_eq!(entries.get(1).unwrap().enabled(), None);
+    assert_eq!(
+        entries.iter().map(|entry| entry.id()).collect::<Vec<_>>(),
+        vec![0x0102, 0x0304]
+    );
+}
+
+#[test]
+fn fixed_offset_layout_validates_fixed_layout_vec() {
+    let value = FixedEntryVecArgs {
+        tag: 9,
+        entries: vec![
+            FixedEntry {
+                id: 0x0102,
+                enabled: Some(true),
+            },
+            FixedEntry {
+                id: 0x0304,
+                enabled: None,
+            },
+        ],
+        checksum: 0xBEEF,
+    };
+    let mut encoded = value.encode().unwrap();
+    encoded[8] = 2;
+
+    let aligned = aligned_copy::<64>(&encoded);
+    assert_eq!(
+        FixedEntryVecArgs::decode(&aligned.0[..encoded.len()]).unwrap_err(),
+        DataLayoutError::InvalidOptionTag
+    );
+
+    encoded[1] = 4;
+    let aligned = aligned_copy::<64>(&encoded);
+    assert_eq!(
+        FixedEntryVecArgs::decode(&aligned.0[..encoded.len()]).unwrap_err(),
+        DataLayoutError::LengthExceedsCapacity
+    );
+}
+
+#[fixed_offset_layout(buffer_offset = 0)]
+struct FixedTrailingEntryVecArgs {
+    tag: u8,
+    #[flexible = 1]
+    entries: Vec<FixedEntry>,
+}
+
+#[test]
+fn fixed_offset_layout_supports_trailing_flexible_fixed_layout_vec() {
+    assert_eq!(FixedTrailingEntryVecArgs::MIN_DATA_LEN, 1);
+    assert_eq!(
+        FixedTrailingEntryVecArgs::MAX_DATA_LEN,
+        1 + 1 + 0xFF * FixedEntry::DATA_LEN
+    );
+    assert_eq!(FixedTrailingEntryVecArgs::OFFSETS, [0, 1]);
+
+    let empty = FixedTrailingEntryVecArgs {
+        tag: 7,
+        entries: vec![],
+    };
+    let empty_encoded = empty.encode().unwrap();
+    assert_eq!(empty_encoded, vec![7]);
+    let aligned = aligned_copy::<64>(&empty_encoded);
+    let view = FixedTrailingEntryVecArgs::decode(&aligned.0[..empty_encoded.len()]).unwrap();
+    assert!(view.entries().is_empty());
+
+    let value = FixedTrailingEntryVecArgs {
+        tag: 7,
+        entries: vec![
+            FixedEntry {
+                id: 0x0102,
+                enabled: Some(false),
+            },
+            FixedEntry {
+                id: 0x0304,
+                enabled: Some(true),
+            },
+        ],
+    };
+    let encoded = value.encode().unwrap();
+    assert_eq!(
+        encoded,
+        [[7, 2].as_slice(), &[0x02, 0x01, 1, 0], &[0x04, 0x03, 1, 1],].concat()
+    );
+
+    let aligned = aligned_copy::<64>(&encoded);
+    let view = FixedTrailingEntryVecArgs::decode(&aligned.0[..encoded.len()]).unwrap();
+    let entries = view.entries();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.get(0).unwrap().enabled(), Some(false));
+    assert_eq!(entries.get(1).unwrap().enabled(), Some(true));
 }
