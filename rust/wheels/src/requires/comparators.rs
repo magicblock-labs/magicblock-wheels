@@ -1,8 +1,4 @@
-///
-/// Require $cond == true
-///
-/// $cond: bool
-///
+/// Require `bool` condition == true.
 #[macro_export]
 macro_rules! require {
     ($cond:expr, $error:expr) => {{
@@ -14,12 +10,7 @@ macro_rules! require {
     }};
 }
 
-///
-/// Require $a < $b
-///
-/// $a : impl Ord
-/// $b : impl Ord
-///
+/// Require left < right.
 #[macro_export]
 macro_rules! require_lt {
     ( $a:expr, $b:expr, $error:expr) => {{
@@ -36,12 +27,7 @@ macro_rules! require_lt {
     }};
 }
 
-///
-/// Require $a <= $b
-///
-/// $a : impl Ord
-/// $b : impl Ord
-///
+/// Require left <= right.
 #[macro_export]
 macro_rules! require_le {
     ( $a:expr, $b:expr, $error:expr) => {{
@@ -58,12 +44,7 @@ macro_rules! require_le {
     }};
 }
 
-///
-/// Require $a == $b
-///
-/// $a : impl Eq
-/// $b : impl Eq
-///
+/// Require left == right.
 #[macro_export]
 macro_rules! require_eq {
     ( $a:expr, $b:expr, $error:expr) => {{
@@ -80,12 +61,7 @@ macro_rules! require_eq {
     }};
 }
 
-///
-/// Require $a != $b
-///
-/// $a : impl Eq
-/// $b : impl Eq
-///
+/// Require left != right.
 #[macro_export]
 macro_rules! require_ne {
     ( $a:expr, $b:expr, $error:expr) => {{
@@ -102,12 +78,7 @@ macro_rules! require_ne {
     }};
 }
 
-///
-/// Require $a >= $b
-///
-/// $a : impl Ord
-/// $b : impl Ord
-///
+/// Require left >= right.
 #[macro_export]
 macro_rules! require_ge {
     ( $a:expr, $b:expr, $error:expr) => {{
@@ -124,12 +95,7 @@ macro_rules! require_ge {
     }};
 }
 
-///
-/// Require $a > $b
-///
-/// $a : impl Ord
-/// $b : impl Ord
-///
+/// Require left > right.
 #[macro_export]
 macro_rules! require_gt {
     ( $a:expr, $b:expr, $error:expr) => {{
@@ -146,11 +112,7 @@ macro_rules! require_gt {
     }};
 }
 
-///
-/// Require $option to be Some, and produce the value
-///
-/// `$option: Option<T>`
-///
+/// Require `Option<T>` is `Some`; return `T`.
 #[macro_export]
 macro_rules! require_some {
     ($option:expr, $error:expr) => {{
@@ -161,11 +123,7 @@ macro_rules! require_some {
     }};
 }
 
-///
-/// Require $result to be Ok, and produce the value
-///
-/// $result: Result<T, E>
-///
+/// Require `Result<T, E>` is `Ok`; return `T`.
 #[macro_export]
 macro_rules! require_ok {
     ($result:expr, $error:expr) => {{

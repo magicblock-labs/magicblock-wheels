@@ -3,9 +3,9 @@
 pub extern crate alloc;
 
 pub mod layout;
+pub mod requires;
 
 mod data_layout_error;
-mod requires;
 
 pub use data_layout_error::DataLayoutError;
 
