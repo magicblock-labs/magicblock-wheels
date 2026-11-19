@@ -6,12 +6,181 @@ mod fixed_offset_layout;
 mod variable_offset_layout;
 
 ///
-/// Fixed-offset layout with capacity-reserved variable fields.
+/// Usage
+/// =====
 ///
-/// `Vec<T>` fields use `#[capacity = N]` and reserve space for `N` elements,
-/// so later fields keep stable compile-time offsets. A final field may use
-/// `#[flexible = 1]`, `#[flexible = 2]`, or `#[flexible]` for a trailing
-/// variable-length Vec or Option.
+/// ```ignore
+///
+/// use wheels::Pubkey;
+///
+/// #[fixed_offset_layout(buffer_offset = 0)]
+/// struct FixedTransferArgs {
+///     shuttle_id: u32,
+///     validator: Option<Pubkey>,
+///     #[capacity = 72]
+///     encrypted_destination: Vec<u8>,
+///     checksum: u16,
+/// }
+///
+/// #[fixed_offset_layout(buffer_offset = 0)]
+/// struct TransferWithTrailingPayloadArgs {
+///     shuttle_id: u32,
+///     #[capacity = 4]
+///     reserved_tags: Vec<u8>,
+///     #[extendable = 2]
+///     payload: Vec<u8>,
+/// }
+///
+/// ```
+///
+/// The generated code refers directly to `::wheels`, `::alloc`, `::bytemuck`,
+/// `::pinocchio`, and `::pinocchio_log`. In `no_std` crates, bring `alloc`
+/// into scope with `extern crate alloc;`.
+///
+/// Layout forms
+/// ============
+///
+/// `fixed_offset_layout` keeps field start offsets stable. It has two encoded
+/// size forms:
+///
+///   - Constant-size layouts.
+///
+///     All fields have fixed encoded slots. `Vec<T>` fields use
+///     `#[capacity = N]`, reserve space for `N` elements, and expose both
+///     active `len` and schema `capacity` in generated views. The macro emits
+///     `DATA_LEN` and implements `Encodable`, `Decodable`, and
+///     `FixedSizeLayout`.
+///
+///   - Trailing variable-length layouts.
+///
+///     The final field may use `#[extendable = N]` for a
+///     trailing `Vec<T>`, or `#[flexible]` for a trailing `Option<T>`. Earlier
+///     fields still have fixed offsets, but total encoded length varies, so the
+///     macro emits `MIN_DATA_LEN` and `MAX_DATA_LEN` instead of `DATA_LEN`.
+///     These layouts do not implement `FixedSizeLayout`.
+///
+///     For a trailing extendable Vec, canonical `encode()` output contains only
+///     active elements. `decode()` may also receive larger account/storage bytes
+///     and treats spare trailing bytes as Vec capacity. Generated getters return
+///     `ExtendableVec`, which exposes both active `len()` and storage
+///     `capacity()`.
+///
+/// Attributes
+/// ==========
+///
+/// Struct attributes:
+///   - `#[fixed_offset_layout(buffer_offset = N)]`, where `N` is `0..=7`
+///   - `#[fixed_offset_layout(buffer_offset = unknown)]`
+///
+///     - `buffer_offset`
+///
+///       Mandatory.
+///
+///       Use `buffer_offset = N` when the input slice always starts at a known
+///       offset from an 8-byte aligned base address:
+///
+///       `(bytes.as_ptr() as usize) % 8`
+///
+///       Example:
+///
+///       - if the original account or instruction buffer is 8-byte aligned and
+///         the payload slice passed to `decode()` is `&input[1..]`, then
+///         `buffer_offset = 1`.
+///
+///       Fixed offsets are used both at runtime and at compile-time:
+///
+///       - the generated decoder validates that the actual slice pointer matches
+///         this offset
+///       - borrowed getters are only generated when their alignment can be
+///         guaranteed for every valid encoding under this `buffer_offset`
+///
+///       Use `buffer_offset = unknown` when the slice may start at any
+///       address. This mode emits no pointer-offset check and rejects borrowed
+///       views whose required alignment is greater than 1. Copy-decoded fields
+///       such as integer primitives remain supported.
+///
+/// Field attributes:
+///   - `#[capacity = N]`
+///
+///     - Mandatory for fixed-capacity `Vec<T>` fields.
+///     - Reserves space for exactly `N` elements.
+///     - The encoded Vec length uses a 1-byte header when `N <= 255`, otherwise
+///       a 2-byte header.
+///     - Generated views expose an additional `<field>_capacity()` method.
+///     - Generated mutable views expose `<field>_mut()` returning
+///       `FixedCapacityVec`.
+///
+///   - `#[extendable = N]`
+///
+///     - Applicable only to the final field when that field is `Vec<T>`.
+///     - `N` must be `1..=8` and is the width, in bytes, of the encoded Vec
+///       length header.
+///     - For `N = 8`, the supported Vec length is still capped at
+///       `u32::MAX`.
+///     - The field contributes only its active payload bytes to canonical
+///       encoded length.
+///     - Generated immutable getters return `ExtendableVec`.
+///     - Generated mutable views expose `<field>_mut()` returning `ExtendableVec`.
+///
+///   - `#[flexible]`
+///
+///     - Applicable only to the final field when that field is `Option<T>`.
+///     - `None` omits the option tag and payload entirely.
+///     - `Some(value)` writes a tag byte followed by the value payload.
+///
+/// Supported field kinds:
+///
+///   - Plain `bool` and `Option<bool>` are supported.
+///     They are encoded as a single backing `u8` byte where `0` means `false`
+///     and any non-zero byte decodes as `true`.
+///   - `Vec<bool>` and `Option<Vec<T>>` are intentionally not supported.
+///   - Plain `Pubkey`/`Address` and `Option<Pubkey>`/`Option<Address>` are
+///     supported. Views return borrowed keys.
+///   - Integer primitives, fixed-size arrays of integer primitives, and Vecs of
+///     supported fixed-value element types are supported.
+///   - `Vec<T>` for user-defined layout element types is supported when `T`
+///     implements `FixedSizeLayout`. Fixed-capacity generated views return
+///     `FixedLayoutSlice<'_, T>`. Final extendable Vec getters return
+///     `ExtendableVec`.
+///   - `Option<T>` for a user-defined layout type is supported as the final
+///     field. Without `#[flexible]`, `T` must implement `FixedSizeLayout` and
+///     the field reserves a tag and fixed-size payload. With `#[flexible]`,
+///     `T` may have a fixed or variable encoded size and must implement
+///     `Encodable`, `Decodable`, and `LayoutBounds`; `None` omits the field and
+///     `Some` uses the actual encoded payload length.
+///
+/// APIs
+/// ====
+///
+/// Fields:
+///   - `pub const DATA_LEN: usize`
+///     for constant-size layouts
+///   - `pub const MIN_DATA_LEN: usize` and `pub const MAX_DATA_LEN: usize`
+///     for trailing variable-length layouts
+///   - `pub const OFFSETS: [usize; N]`
+///     for field start offsets
+///
+/// Trait APIs:
+///   - all layouts implement `Encodable`
+///   - all layouts implement `Decodable`; trailing extendable Vec layouts decode
+///     the supplied final storage region, so spare trailing Vec capacity is
+///     accepted and exposed by the generated view
+///   - constant-size layouts also implement `PrefixDecodable` and
+///     `FixedSizeLayout`
+///
+/// Methods:
+///   - all layouts emit `decode_mut(storage: &impl LayoutStorageMut)`,
+///     returning a mutable storage-backed view
+///   - mutable views expose `<field>_mut()` helpers. Plain aligned POD fields
+///     return a mutable guard, encoded bool/Option fields return slot helpers,
+///     user-defined nested-layout options return `FixedLayoutOptionMut` or
+///     `FlexibleLayoutOptionMut`,
+///     fixed-capacity Vec fields return `FixedCapacityVec`, and trailing
+///     extendable Vec fields return `ExtendableVec`.
+///
+/// Import the relevant traits from `wheels::layout` to call `encode`,
+/// `encode_to`, `decode`, or `decode_prefix`. These APIs return
+/// `DataLayoutError`.
 #[proc_macro_attribute]
 pub fn fixed_offset_layout(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr_string = attr.to_string();
@@ -58,9 +227,9 @@ pub fn fixed_offset_layout(attr: TokenStream, item: TokenStream) -> TokenStream 
 /// ==========
 ///
 /// Struct attributes:
-///   - `#[variable_offset_layout(buffer_offset = 0..=7)]`
-///   - `#[variable_offset_layout(buffer_offset = unaligned)]`
-///   - `#[variable_offset_layout(buffer_offset = 0..=7, option = implicit)]`
+///   - `#[variable_offset_layout(buffer_offset = N)]`, where `N` is `0..=7`
+///   - `#[variable_offset_layout(buffer_offset = unknown)]`
+///   - `#[variable_offset_layout(buffer_offset = N, option = implicit)]`
 ///
 ///     - `buffer_offset`
 ///
@@ -84,7 +253,7 @@ pub fn fixed_offset_layout(attr: TokenStream, item: TokenStream) -> TokenStream 
 ///       - borrowed getters are only generated when their alignment can be
 ///         guaranteed for every valid encoding under this `buffer_offset`
 ///
-///       Use `buffer_offset = unaligned` when the slice may start at any
+///       Use `buffer_offset = unknown` when the slice may start at any
 ///       address, such as when decoding the remaining bytes after
 ///       variable-length data. This mode emits no pointer-offset check and
 ///       rejects borrowed views whose required alignment is greater than 1.
@@ -140,6 +309,16 @@ pub fn fixed_offset_layout(attr: TokenStream, item: TokenStream) -> TokenStream 
 ///     `Pubkey` is encoded as 32 raw bytes and views return borrowed keys.
 ///   - `Vec<Pubkey>`/`Vec<Address>` is supported and views return borrowed key
 ///     slices.
+///   - `Vec<T>` for user-defined layout element types requires
+///     `#[element_size = fixed]` or `#[element_size = variable]`.
+///     With `fixed`, `T` must implement `FixedSizeLayout` and generated views
+///     return `FixedLayoutSlice<'_, T>`. With `variable`, `T` must implement
+///     `Encodable`, `PrefixDecodable`, and `LayoutBounds`, and generated views
+///     return `VariableLayoutSlice<'_, T>`.
+///   - `Option<T>` for a user-defined layout type is supported when `T`
+///     implements `FixedSizeLayout`. It uses tagged encoding and may be
+///     followed by other fields because their offsets are computed at decode
+///     time. It is not supported with `option = implicit`.
 ///
 /// Field attributes:
 ///   - `#[flexible = N]`
@@ -161,6 +340,17 @@ pub fn fixed_offset_layout(attr: TokenStream, item: TokenStream) -> TokenStream 
 ///     `N` bytes. For `N = 8`, the supported Vec length is still capped at
 ///     `u32::MAX`.
 ///
+///   - `#[element_size = fixed | variable]`
+///
+///     - Mandatory: yes, field-type: `Vec<T>` where `T` is a user-defined
+///       layout element type.
+///     - Not allowed for supported scalar/POD/key Vec element types like
+///       `Vec<u8>` or `Vec<Pubkey>`.
+///     - `fixed` means each element has a constant encoded width and the
+///       generated getter returns `FixedLayoutSlice<'_, T>`.
+///     - `variable` means each element is self-delimiting through prefix
+///       decoding and the generated getter returns `VariableLayoutSlice<'_, T>`.
+///
 /// APIs
 /// ====
 ///
@@ -176,7 +366,8 @@ pub fn fixed_offset_layout(attr: TokenStream, item: TokenStream) -> TokenStream 
 ///   - all layouts implement `Decodable`
 ///   - tagged/self-delimiting layouts also implement `PrefixDecodable`
 ///   - `pub fn encode(&self) -> Result<Vec<u8>, DataLayoutError>`
-///   - `pub fn encode_to(&self, bytes: &mut [u8]) -> Result<(), DataLayoutError>`
+///   - `pub fn encode_to<'a>(&self, out: &'a mut [u8])`
+///     `-> Result<&'a mut [u8], DataLayoutError>`
 #[proc_macro_attribute]
 pub fn variable_offset_layout(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr_string = attr.to_string();

@@ -2,7 +2,8 @@ extern crate alloc;
 
 use pinocchio::{error::ProgramError, Address};
 use wheels::{
-    layout::{Decodable, Encodable, PrefixDecodable},
+    fixed_offset_layout,
+    layout::{Decodable, Encodable, LayoutBounds, PrefixDecodable},
     variable_offset_layout, DataLayoutError, Pubkey,
 };
 
@@ -179,6 +180,367 @@ fn variable_layout_supports_address_vec() {
     assert_eq!(view.header(), 7);
     assert_eq!(view.signers(), signers.as_slice());
     assert_eq!(view.checksum(), 0xBEEF);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[fixed_offset_layout(buffer_offset = unknown)]
+struct FixedVerifierEntry {
+    verifier_identity: Pubkey,
+    verifier_bond: Pubkey,
+    weight: u64,
+}
+
+#[variable_offset_layout(buffer_offset = 0)]
+struct NestedFixedOptionArgs {
+    header: u8,
+    config: Option<FixedVerifierEntry>,
+    checksum: u16,
+}
+
+#[test]
+fn variable_layout_supports_tagged_nested_fixed_option() {
+    assert_eq!(NestedFixedOptionArgs::DATA_LEN_RANGE, (4, 76));
+
+    let none = NestedFixedOptionArgs {
+        header: 3,
+        config: None,
+        checksum: 0xBEEF,
+    }
+    .encode()
+    .unwrap();
+    assert_eq!(
+        none,
+        [vec![3, 0], 0xBEEF_u16.to_le_bytes().to_vec()].concat()
+    );
+
+    let config = FixedVerifierEntry {
+        verifier_identity: Pubkey::from([1; 32]),
+        verifier_bond: Pubkey::from([2; 32]),
+        weight: 11,
+    };
+    let some = NestedFixedOptionArgs {
+        header: 3,
+        config: Some(config.clone()),
+        checksum: 0xBEEF,
+    }
+    .encode()
+    .unwrap();
+    let mut framed = some.clone();
+    framed.extend_from_slice(&[9, 10]);
+    let (view, remaining) = NestedFixedOptionArgs::decode_prefix(&framed).unwrap();
+    let config_view = view.config().unwrap();
+
+    assert_eq!(view.header(), 3);
+    assert_eq!(config_view.verifier_identity(), &config.verifier_identity);
+    assert_eq!(config_view.verifier_bond(), &config.verifier_bond);
+    assert_eq!(config_view.weight(), config.weight);
+    assert_eq!(view.checksum(), 0xBEEF);
+    assert_eq!(remaining, &[9, 10]);
+}
+
+#[test]
+fn variable_layout_rejects_invalid_nested_option_encoding() {
+    let mut bytes = NestedFixedOptionArgs {
+        header: 3,
+        config: None,
+        checksum: 0xBEEF,
+    }
+    .encode()
+    .unwrap();
+    bytes[1] = 2;
+
+    assert_eq!(
+        NestedFixedOptionArgs::decode(&bytes).unwrap_err(),
+        DataLayoutError::InvalidOptionTag
+    );
+
+    bytes[1] = 1;
+    assert_eq!(
+        NestedFixedOptionArgs::decode(&bytes).unwrap_err(),
+        DataLayoutError::TruncatedPayload
+    );
+}
+
+#[variable_offset_layout(buffer_offset = unknown)]
+struct FixedEntryRegistryArgs {
+    registry_revision: u64,
+    #[flexible = 4]
+    #[element_size = fixed]
+    entries: Vec<FixedVerifierEntry>,
+}
+
+#[variable_offset_layout(buffer_offset = unknown)]
+struct FixedEntryRegistryWithChecksumArgs {
+    registry_revision: u64,
+    #[flexible = 1]
+    #[element_size = fixed]
+    entries: Vec<FixedVerifierEntry>,
+    checksum: u16,
+}
+
+#[variable_offset_layout(buffer_offset = unknown)]
+struct TinyFixedEntryRegistryArgs {
+    registry_revision: u64,
+    #[flexible = 1]
+    #[element_size = fixed]
+    entries: Vec<FixedVerifierEntry>,
+}
+
+#[test]
+fn variable_layout_supports_fixed_size_layout_vec() {
+    assert_eq!(FixedVerifierEntry::DATA_LEN, 72);
+    assert_eq!(
+        <FixedVerifierEntry as wheels::layout::FixedSizeLayout>::DATA_LEN,
+        72
+    );
+    assert_eq!(
+        FixedEntryRegistryArgs::DATA_LEN_RANGE,
+        (12, 12 + u32::MAX as usize * 72)
+    );
+
+    let identity_a = Pubkey::from([1; 32]);
+    let bond_a = Pubkey::from([2; 32]);
+    let identity_b = Pubkey::from([3; 32]);
+    let bond_b = Pubkey::from([4; 32]);
+    let value = FixedEntryRegistryArgs {
+        registry_revision: 9,
+        entries: vec![
+            FixedVerifierEntry {
+                verifier_identity: identity_a,
+                verifier_bond: bond_a,
+                weight: 11,
+            },
+            FixedVerifierEntry {
+                verifier_identity: identity_b,
+                verifier_bond: bond_b,
+                weight: 13,
+            },
+        ],
+    };
+
+    let encoded = value.encode().unwrap();
+    assert_eq!(encoded.len(), 8 + 4 + 2 * FixedVerifierEntry::DATA_LEN);
+    assert_eq!(&encoded[..8], 9_u64.to_le_bytes().as_slice());
+    assert_eq!(&encoded[8..12], 2_u32.to_le_bytes().as_slice());
+
+    let view = FixedEntryRegistryArgs::decode(&encoded).unwrap();
+    assert_eq!(view.registry_revision(), 9);
+
+    let entries = view.entries();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.as_bytes().len(), 2 * FixedVerifierEntry::DATA_LEN);
+
+    let first = entries.get(0).unwrap();
+    assert_eq!(first.verifier_identity(), &identity_a);
+    assert_eq!(first.verifier_bond(), &bond_a);
+    assert_eq!(first.weight(), 11);
+
+    let weights = entries
+        .iter()
+        .map(|entry| entry.weight())
+        .collect::<Vec<_>>();
+    assert_eq!(weights, vec![11, 13]);
+
+    let mut truncated = encoded;
+    truncated.pop();
+    assert_eq!(
+        FixedEntryRegistryArgs::decode(&truncated).unwrap_err(),
+        DataLayoutError::TruncatedVectorPayload
+    );
+}
+
+#[test]
+fn variable_layout_computes_offsets_after_fixed_size_layout_vec() {
+    assert_eq!(
+        FixedEntryRegistryWithChecksumArgs::DATA_LEN_RANGE,
+        (11, 11 + 0xFF * FixedVerifierEntry::DATA_LEN)
+    );
+
+    let identity = Pubkey::from([5; 32]);
+    let bond = Pubkey::from([6; 32]);
+    let value = FixedEntryRegistryWithChecksumArgs {
+        registry_revision: 12,
+        entries: vec![FixedVerifierEntry {
+            verifier_identity: identity,
+            verifier_bond: bond,
+            weight: 17,
+        }],
+        checksum: 0xBEEF,
+    };
+
+    let encoded = value.encode().unwrap();
+    let checksum_offset = 8 + 1 + FixedVerifierEntry::DATA_LEN;
+    assert_eq!(encoded.len(), checksum_offset + 2);
+    assert_eq!(&encoded[..8], 12_u64.to_le_bytes().as_slice());
+    assert_eq!(encoded[8], 1);
+    assert_eq!(
+        &encoded[checksum_offset..checksum_offset + 2],
+        0xBEEF_u16.to_le_bytes().as_slice()
+    );
+
+    let view = FixedEntryRegistryWithChecksumArgs::decode(&encoded).unwrap();
+    assert_eq!(view.registry_revision(), 12);
+    assert_eq!(view.checksum(), 0xBEEF);
+    let entry = view.entries().get(0).unwrap();
+    assert_eq!(entry.verifier_identity(), &identity);
+    assert_eq!(entry.verifier_bond(), &bond);
+    assert_eq!(entry.weight(), 17);
+
+    let empty = FixedEntryRegistryWithChecksumArgs {
+        registry_revision: 13,
+        entries: vec![],
+        checksum: 0xCAFE,
+    };
+    let empty_encoded = empty.encode().unwrap();
+    assert_eq!(
+        empty_encoded,
+        [
+            13_u64.to_le_bytes().as_slice(),
+            &[0],
+            0xCAFE_u16.to_le_bytes().as_slice(),
+        ]
+        .concat()
+    );
+    let empty_view = FixedEntryRegistryWithChecksumArgs::decode(&empty_encoded).unwrap();
+    assert_eq!(empty_view.entries().len(), 0);
+    assert_eq!(empty_view.checksum(), 0xCAFE);
+}
+
+#[test]
+fn variable_layout_rejects_fixed_size_layout_vec_capacity_overflow() {
+    let entry = FixedVerifierEntry {
+        verifier_identity: Pubkey::from([1; 32]),
+        verifier_bond: Pubkey::from([2; 32]),
+        weight: 11,
+    };
+    let value = TinyFixedEntryRegistryArgs {
+        registry_revision: 9,
+        entries: vec![entry; 256],
+    };
+
+    assert_eq!(
+        value.encode().unwrap_err(),
+        DataLayoutError::LengthExceedsCapacity
+    );
+}
+
+#[variable_offset_layout(buffer_offset = unknown)]
+struct PrefixEntry {
+    id: u16,
+    #[flexible = 1]
+    payload: Vec<u8>,
+}
+
+#[variable_offset_layout(buffer_offset = unknown)]
+struct PrefixEntryRegistryArgs {
+    version: u8,
+    #[flexible = 1]
+    #[element_size = variable]
+    entries: Vec<PrefixEntry>,
+    checksum: u16,
+}
+
+#[variable_offset_layout(buffer_offset = unknown)]
+struct PrefixEntryLogArgs {
+    #[flexible = 1]
+    #[element_size = variable]
+    entries: Vec<PrefixEntry>,
+}
+
+#[test]
+fn variable_layout_supports_prefix_layout_vec() {
+    assert_eq!(
+        <PrefixEntry as LayoutBounds>::MIN_DATA_LEN,
+        PrefixEntry::DATA_LEN_RANGE.0
+    );
+    assert_eq!(
+        <PrefixEntry as LayoutBounds>::MAX_DATA_LEN,
+        PrefixEntry::DATA_LEN_RANGE.1
+    );
+    assert_eq!(PrefixEntry::DATA_LEN_RANGE, (3, 258));
+    assert_eq!(PrefixEntryRegistryArgs::DATA_LEN_RANGE, (4, 65794));
+
+    let value = PrefixEntryRegistryArgs {
+        version: 7,
+        entries: vec![
+            PrefixEntry {
+                id: 0x1001,
+                payload: vec![9, 8],
+            },
+            PrefixEntry {
+                id: 0x1002,
+                payload: vec![],
+            },
+        ],
+        checksum: 0xBEEF,
+    };
+
+    let encoded = value.encode().unwrap();
+    let expected = [
+        &[7, 2],
+        0x1001_u16.to_le_bytes().as_slice(),
+        &[2, 9, 8],
+        0x1002_u16.to_le_bytes().as_slice(),
+        &[0],
+        0xBEEF_u16.to_le_bytes().as_slice(),
+    ]
+    .concat();
+    assert_eq!(encoded, expected);
+
+    let view = PrefixEntryRegistryArgs::decode(&encoded).unwrap();
+    assert_eq!(view.version(), 7);
+    assert_eq!(view.checksum(), 0xBEEF);
+
+    let entries: wheels::layout::VariableLayoutSlice<'_, PrefixEntry> = view.entries();
+    assert_eq!(entries.len(), 2);
+    assert!(!entries.is_empty());
+    assert_eq!(entries.as_bytes(), &encoded[2..encoded.len() - 2]);
+
+    let first = entries.get(0).unwrap();
+    assert_eq!(first.id(), 0x1001);
+    assert_eq!(first.payload(), &[9, 8]);
+
+    let second = entries.get(1).unwrap();
+    assert_eq!(second.id(), 0x1002);
+    assert_eq!(second.payload(), &[]);
+    assert!(entries.get(2).is_none());
+
+    let payload_lens = entries
+        .iter()
+        .map(|entry| entry.payload().len())
+        .collect::<Vec<_>>();
+    assert_eq!(payload_lens, vec![2, 0]);
+}
+
+#[test]
+fn variable_layout_rejects_invalid_prefix_layout_vec() {
+    let malformed_entry = [0x1001_u16.to_le_bytes().as_slice(), &[2, 9]].concat();
+    let encoded = [&[1], malformed_entry.as_slice()].concat();
+    assert_eq!(
+        PrefixEntryLogArgs::decode(&encoded).unwrap_err(),
+        DataLayoutError::TruncatedVectorPayload
+    );
+
+    let value = PrefixEntryRegistryArgs {
+        version: 7,
+        entries: vec![
+            PrefixEntry {
+                id: 0x1001,
+                payload: vec![9, 8],
+            },
+            PrefixEntry {
+                id: 0x1002,
+                payload: vec![],
+            },
+        ],
+        checksum: 0xBEEF,
+    };
+    let mut encoded = value.encode().unwrap();
+    encoded[1] = 3;
+    assert_eq!(
+        PrefixEntryRegistryArgs::decode(&encoded).unwrap_err(),
+        DataLayoutError::MissingLengthHeader
+    );
 }
 
 #[variable_offset_layout(buffer_offset = 0)]
@@ -688,8 +1050,8 @@ fn variable_layout_buffer_offset_one_allows_unaligned_copy_only_views() {
     assert_eq!(view.counter(), 7);
 }
 
-#[variable_offset_layout(buffer_offset = unaligned)]
-struct UnalignedDynamicArgs {
+#[variable_offset_layout(buffer_offset = unknown)]
+struct UnknownOffsetArgs {
     amount: u64,
     enabled: bool,
     authority: Pubkey,
@@ -700,7 +1062,7 @@ struct UnalignedDynamicArgs {
 }
 
 #[test]
-fn variable_layout_unaligned_buffer_offset_decodes_copy_and_alignment_one_views() {
+fn variable_layout_unknown_buffer_offset_decodes_copy_and_alignment_one_views() {
     let mut aligned = Aligned([0; 80]);
     let bytes = &mut aligned.0[1..];
 
@@ -712,7 +1074,7 @@ fn variable_layout_unaligned_buffer_offset_decodes_copy_and_alignment_one_views(
     bytes[74..77].copy_from_slice(&[4, 5, 6]);
     bytes[77..79].copy_from_slice(&9_u16.to_le_bytes());
 
-    let view = UnalignedDynamicArgs::decode(&bytes[..79]).unwrap();
+    let view = UnknownOffsetArgs::decode(&bytes[..79]).unwrap();
 
     assert_eq!(view.amount(), 55);
     assert!(view.enabled());

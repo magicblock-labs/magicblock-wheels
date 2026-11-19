@@ -1,0 +1,378 @@
+//! Layout traits, generated view helpers, and layout-selection guidance.
+//!
+//! Most users interact with this module by importing the generated-layout
+//! traits:
+//!
+//! ```ignore
+//! use wheels::layout::{Decodable, Encodable, PrefixDecodable};
+//! ```
+//!
+//! Layout structs are still written with ordinary Rust field types such as
+//! `Vec<T>` and `Option<T>`. Helper view types like [`FixedLayoutSlice`] and
+//! [`VariableLayoutSlice`] appear only in generated view getters. For a final
+//! extendable Vec in `fixed_offset_layout`, generated getters return
+//! [`ExtendableVec`] so callers can see both active `len` and backing storage
+//! `capacity`. Generated mutable views use helper types like
+//! [`LayoutValueMut`] and [`FixedCapacityVec`] so account storage can be
+//! updated without rebuilding an owned value.
+//!
+//! # Why Layouts Exist
+//!
+//! Layouts are not intended to be a better general-purpose serializer than
+//! Borsh or bincode. Those libraries serialize Rust values into bytes and
+//! deserialize bytes back into Rust values. Wheels layouts are for cases where
+//! the encoded bytes are themselves the data structure: validated storage or
+//! argument layouts with generated borrowed views.
+//!
+//! The clearest example is account storage. Borsh and bincode do not model
+//! "this `Vec` has capacity 72 in the account, but only len 5 is active." That
+//! is not ordinary serialization anymore; it is storage layout. A layout can
+//! reserve schema-level capacity, expose the active length, and still let code
+//! inspect the encoded account bytes without rebuilding an owned value.
+//!
+//! The main design goal is CU-friendly access to encoded on-chain data. To
+//! achieve that, layouts prioritize:
+//!
+//! - **zero-alloc** decode;
+//! - practically **zero-copy** access, copying only small scalar values where a
+//!   copy is cheaper and simpler than a reference;
+//! - stable field offsets for account/state data, so fixed-position fields can
+//!   be accessed, validated, and updated directly from their schema offsets
+//!   while any flexible payload is kept at the end. This applies specifically
+//!   to [`fixed_offset_layout!`](crate::fixed_offset_layout);
+//! - explicit low-level choices for buffer offset, capacity, length-header
+//!   width, alignment, and fixed-size versus variable-size nested elements;
+//! - compact encodings for on-chain payloads where every byte and compute unit
+//!   matters.
+//!
+//! This comes with a real cost: layouts expose more low-level decisions than
+//! Borsh or bincode. That is intentional. When compute units, storage size, or
+//! account layout semantics matter, the macro asks users to choose explicitly
+//! instead of relying on hidden defaults. For ordinary serialization, prefer
+//! Borsh or bincode.
+//!
+//! # Supported Types
+//!
+//! Both layout macros support:
+//!
+//! - `bool`
+//! - `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `i128`, `u128`, `isize`, `usize`
+//! - `[T; N]`, where `T` is one of those integer primitives
+//! - [`Pubkey`](crate::Pubkey)/`Address`
+//! - `Option<T>` for supported fixed-value types
+//! - tagged `Option<T>` containing a user-defined layout
+//! - `Vec<T>` for supported fixed-value element types except `bool`
+//!
+//! The following shapes are intentionally not supported:
+//!
+//! - `String`
+//! - `Vec<bool>`
+//! - `Option<Vec<T>>`
+//!
+//! [`fixed_offset_layout!`](crate::fixed_offset_layout) also supports `Vec<T>`
+//! where `T` is a user-defined fixed-size layout type. The generated getter
+//! returns [`FixedLayoutSlice`] for fixed-capacity fields or [`ExtendableVec`]
+//! for a final extendable Vec field. A user-defined `Option<T>` must be the
+//! final field. A normal option requires `T: FixedSizeLayout`; with
+//! `#[flexible]`, `T` may have a fixed or variable encoded size and all bytes
+//! are omitted when absent.
+//!
+//! [`variable_offset_layout!`](crate::variable_offset_layout) supports `Vec<T>`
+//! where `T` is a user-defined layout type. Those fields must choose
+//! `#[element_size = fixed]` or `#[element_size = variable]` explicitly.
+//! User-defined `Option<T>` fields use tagged encoding and require
+//! `T: FixedSizeLayout`; they are not supported with `option = implicit`.
+//!
+//! # Choosing a Layout Macro
+//!
+//! Wheels provides two layout macros:
+//!
+//! - [`fixed_offset_layout!`](crate::fixed_offset_layout), for stable field
+//!   offsets and reserved storage.
+//! - [`variable_offset_layout!`](crate::variable_offset_layout), for compact
+//!   encodings where later field offsets may depend on earlier field lengths.
+//!
+//! | Topic | `fixed_offset_layout` | `variable_offset_layout` |
+//! |---|---|---|
+//! | Best fit | Account/state data, reserved slots, schemas that benefit from stable field starts. | Instruction args, compact records, data where avoiding reserved bytes matters. |
+//! | Field offsets | Field starts are compile-time offsets, except total length may vary when the final field is variable-length. | Offsets after a variable-size field are computed from encoded lengths at decode time. |
+//! | Encoded size | Constant-size layouts expose `DATA_LEN`; trailing variable-length layouts expose `MIN_DATA_LEN` and `MAX_DATA_LEN`. | Fixed-size layouts expose `DATA_LEN`; finite optional-size layouts expose `DATA_LENS`; Vec layouts expose `DATA_LEN_RANGE`. |
+//! | Normal `Option<T>` | Encodes a 1-byte tag plus payload when present. | Encodes a 1-byte tag plus payload when present. |
+//! | Flexible `Option<T>` | The final field may use `#[flexible]`; `None` omits the field entirely and `Some` writes tag plus payload. | Not supported as a field attribute. Use normal tagged options, or `option = implicit` for eligible compatibility types. |
+//! | Implicit `Option<T>` | Not supported. | ⚠️ Backward compatibility only; avoid for new types. The struct-level `option = implicit` mode omits option tags and saves one byte per `Option<T>`, but is allowed only when there are no Vec fields and option presence can be inferred unambiguously from total encoded length. |
+//! | `Vec<T>` of supported scalar/key types | Uses `#[capacity = N]` to reserve space for `N` elements. Views expose active `len` and a `<field>_capacity()` method. | Uses `#[flexible = N]` to encode only active elements. Views return borrowed slices like `&[T]`. |
+//! | Extendable `Vec<T>` | Allowed only as the final field with `#[extendable = N]`, where `N` can be `1..=8`. Canonical `encode()` writes only active bytes. `decode()` may receive larger storage and exposes spare trailing bytes as [`ExtendableVec::capacity`]. | Not supported. Every Vec uses `#[flexible = N]` and models only active encoded elements. |
+//! | `Vec<T>` of user-defined layout types | Requires `T: FixedSizeLayout`; uses `#[capacity = N]` or final `#[extendable = N]`. Fixed-capacity getters return [`FixedLayoutSlice`]; final extendable getters return [`ExtendableVec`]. | Requires `#[element_size = fixed]` or `#[element_size = variable]`. Fixed elements return [`FixedLayoutSlice`]; variable elements return [`VariableLayoutSlice`]. |
+//! | `Option<T>` of a user-defined layout | Must be the final field. A normal option requires `T: FixedSizeLayout` and reserves a tag plus `T::DATA_LEN` bytes. With `#[flexible]`, `T: Encodable + Decodable + LayoutBounds` may have variable size; `None` omits all bytes and `Some` uses the encoded payload length. | Requires `T: FixedSizeLayout`; uses tagged encoding and dynamically advances later field offsets. It is not supported with `option = implicit`. |
+//! | Mutation | `decode_mut(storage)` is generated for every fixed layout. Fixed-capacity Vec fields return [`FixedCapacityVec`] and can grow active `len` up to schema capacity without resizing storage. Final extendable Vec fields return [`ExtendableVec`] and may resize storage. | Not currently generated. |
+//! | Prefix decoding | Constant-size layouts implement [`PrefixDecodable`]. Trailing variable-length layouts implement [`Decodable`]; final extendable Vec decodes the supplied storage region, while final flexible Option remains exactly framed. | Normal layouts implement [`PrefixDecodable`]. Layouts using `option = implicit` need exact framing and implement [`Decodable`]. |
+//! | Alignment | Use `buffer_offset = 0..=7` when the input starts at a known offset from an 8-byte aligned base. Use `buffer_offset = unknown` only when generated views do not borrow alignment-sensitive fields. | Use `buffer_offset = 0..=7` when the input starts at a known offset from an 8-byte aligned base; use `buffer_offset = unknown` only when generated views do not borrow alignment-sensitive fields. |
+//!
+//! # Attribute Reference
+//!
+//! | Attribute | `fixed_offset_layout` | `variable_offset_layout` | Meaning |
+//! |---|---|---|---|
+//! | `buffer_offset = 0..=7` | Struct-level; required. | Struct-level; required. | Declares the known byte offset of the decoded slice from an 8-byte aligned base. The decoder validates that pointer offset, and the macro uses it to decide which borrowed views are alignment-safe. |
+//! | `buffer_offset = unknown` | Struct-level; required alternative. | Struct-level; required alternative. | Use when the slice start address is not known. The decoder skips pointer-offset checking, and the macro rejects borrowed views that need alignment greater than 1. |
+//! | `option = implicit` | Not supported. | Struct-level; optional. | Backward-compatibility mode for structs without Vec fields. It omits option tags and infers option presence from the total encoded length. |
+//! | `#[capacity = N]` | Field-level; fixed-capacity `Vec<T>` only. | Not supported. | Reserves exactly `N` element slots in fixed-offset storage. The active Vec length may change up to that schema capacity without resizing storage. |
+//! | `#[extendable = N]` | Field-level; final `Vec<T>` only. | Not supported. | Uses an `N`-byte length header (`1..=8`) for a trailing Vec. `N` is length-header width, not capacity. Canonical encoding contains only active elements, while decoding larger trailing storage exposes spare capacity through [`ExtendableVec`]. |
+//! | `#[flexible]` | Field-level; final `Option<T>` only. | Not supported. | Makes a trailing option omit all bytes for `None`; `Some` stores the normal option tag plus payload. |
+//! | `#[flexible = N]` | Not supported; fixed trailing Vecs use `#[extendable = N]`. | Field-level; every `Vec<T>` field. | Uses an `N`-byte length header (`1..=8`) and encodes only active elements. `N` is length-header width, not capacity, and later field offsets are decoded dynamically. |
+//! | `#[element_size = fixed]` | Not supported. | Field-level; user-defined `Vec<T>` element types only. | Declares that each nested layout element has constant encoded width, so generated getters can return [`FixedLayoutSlice`]. |
+//! | `#[element_size = variable]` | Not supported. | Field-level; user-defined `Vec<T>` element types only. | Declares that nested layout elements are prefix-decodable variable-size values, so generated getters return [`VariableLayoutSlice`]. |
+//!
+//! # Mutability
+//!
+//! Mutability is supported only by
+//! [`fixed_offset_layout!`](crate::fixed_offset_layout). Every fixed-offset
+//! layout generates `decode_mut(storage)`, where `storage` implements
+//! [`LayoutStorageMut`]. This is designed for account/state storage: fixed
+//! fields can be updated in place, fixed-capacity Vec fields can change active
+//! `len` within reserved storage, and trailing extendable fields can resize the
+//! backing storage when their encoded length changes.
+//!
+//! Generated mutable views expose `<field>_mut()` helpers instead of returning
+//! the same values as immutable getters. This matters because account data is
+//! borrowed through a storage guard; a mutable helper either owns that borrow
+//! guard or performs short-lived `get`/`set` operations. It also avoids
+//! treating encoded layouts like normal Rust layouts: encoded `bool`,
+//! `Option<T>`, and `Vec<T>` are byte-level layouts, not Rust `bool`,
+//! `Option<T>`, or `Vec<T>` values in memory.
+//!
+//! | Field form in `fixed_offset_layout` | Generated mutable helper | Mutation behavior |
+//! |---|---|---|
+//! | Aligned integer primitives, [`Pubkey`](crate::Pubkey)/`Address`, and fixed-size integer arrays | [`LayoutValueMut`] | Owns the storage borrow and implements `DerefMut<Target = T>` for direct in-place updates.<br><br>`*view.amount_mut()? += 1;` |
+//! | Unaligned integer primitives or fixed-size integer arrays | [`LayoutCopyMut`] | Exposes `get()` and `set(value)` and writes bytes without creating an invalid `&mut T`.<br><br>`view.amount_mut()?.set(42)?;` |
+//! | `bool` | [`LayoutBoolMut`] | Exposes `get()` and `set(bool)` because the encoded form is a backing `u8`.<br><br>`view.enabled_mut()?.set(true)?;` |
+//! | Fixed `Option<T>` | [`LayoutOptionMut`] or [`LayoutBoolOptionMut`] | Updates the tag and payload in place; the reserved option slot size does not change.<br><br>`view.authority_mut()?.set(Some(key))?;` |
+//! | Trailing flexible `Option<T>` | [`LayoutOptionMut`] or [`LayoutBoolOptionMut`] | `None` resizes storage back to the field offset; `Some` resizes to tag plus payload length.<br><br>`view.delegate_mut()?.set(None)?;` |
+//! | Final `Option<T>` with a nested layout | [`FixedLayoutOptionMut`] or [`FlexibleLayoutOptionMut`] | Encodes a replacement nested value directly into storage. A normal option requires `T: FixedSizeLayout` and retains its reserved payload bytes; `#[flexible]` accepts any bounded nested layout and resizes storage to its encoded length.<br><br>`view.config_mut()?.set(Some(&config))?;` |
+//! | `#[capacity = N] Vec<T>` | [`FixedCapacityVec`] | Can `push`, `pop`, `set`, `truncate`, and `clear` active elements up to schema capacity `N`; it never resizes storage.<br><br>`view.items_mut()?.push(item)?;` |
+//! | Final `#[extendable = N] Vec<T>` | [`ExtendableVec`] | Can `push`, `extend_from_slice`, `pop`, `set`, `truncate`, and `clear`; it may resize storage to grow capacity because the field is trailing.<br><br>`view.tail_mut()?.push(item)?;` |
+//!
+//! In other words, only a trailing extendable Vec can expand its backing
+//! capacity. A non-trailing fixed-capacity Vec can still expand its active
+//! length, but only up to the capacity reserved by the schema.
+//! Direct storage implementations such as `AccountView` resize to exactly the
+//! requested byte length. To reduce repeated reallocations while growing a
+//! trailing extendable Vec in a loop, wrap the storage in [`MaxLenStorage`]
+//! before calling `decode_mut()`.
+//!
+//! # Practical Guidelines
+//!
+//! Use [`fixed_offset_layout!`](crate::fixed_offset_layout) when the encoded
+//! data is long-lived state and stable offsets are useful. This is the better
+//! fit when a `Vec<T>` should have schema-level capacity, because the layout
+//! reserves storage even when the active length is smaller.
+//! User-defined `Vec<T>` elements in `fixed_offset_layout` must be fixed-size
+//! layouts and do not use `#[element_size = ...]`.
+//! A final `#[extendable = N] Vec<T>` is the exception to fixed-size total
+//! storage: canonical `encode()` stores only active elements, but `decode()`
+//! can view an account/storage buffer with spare trailing bytes. The generated
+//! getter returns [`ExtendableVec`], which reports both `len()` and `capacity()`.
+//! For mutation, generated `decode_mut(storage)` works with
+//! [`LayoutStorageMut`] and exposes `<field>_mut()` helpers for scalar,
+//! option, and Vec fields.
+//!
+//! Use [`variable_offset_layout!`](crate::variable_offset_layout) when compact
+//! encoding matters more than stable offsets. This is usually the better fit
+//! for instruction arguments, payloads with multiple Vec fields, and nested
+//! user-defined layout elements.
+//!
+//! For user-defined `Vec<T>` elements inside `variable_offset_layout`, make the
+//! element-size decision explicit:
+//!
+//! ```ignore
+//! #[flexible = 1]
+//! #[element_size = fixed]
+//! entries: Vec<FixedEntry>,
+//!
+//! #[flexible = 1]
+//! #[element_size = variable]
+//! entries: Vec<VariableEntry>,
+//! ```
+//!
+//! `fixed` means each element has a constant encoded width and the generated
+//! getter returns [`FixedLayoutSlice`]. `variable` means each element is
+//! self-delimiting through [`PrefixDecodable`] and the generated getter returns
+//! [`VariableLayoutSlice`].
+//!
+//! Avoid `option = implicit` for new types. It exists for backward compatibility
+//! with older compact encodings. Because it omits option tags, decoding depends
+//! on the total encoded length. That is why it is not available with Vec fields
+//! and why the macro rejects ambiguous option-size combinations.
+//!
+use crate::DataLayoutError;
+
+// An 8-byte flexible length header can encode far beyond practical account
+// sizes. Layout bounds are `usize` values computed as
+// `len_width + max_len * elem_size`, so accepting the full `u64::MAX` range
+// would make those bounds overflow instead of being useful API.
+pub(super) const MAX_SUPPORTED_VEC_LEN: usize = u32::MAX as usize;
+
+mod extendable_vec;
+mod fixed_capacity_vec;
+mod fixed_slice;
+mod storage;
+mod value_mut;
+mod variable_slice;
+
+pub use extendable_vec::{
+    ExtendableVec, FixedLayoutElement, FixedLayoutExtendableVecIter, FixedValueElement,
+};
+pub use fixed_capacity_vec::FixedCapacityVec;
+pub use fixed_slice::{FixedLayoutSlice, FixedLayoutSliceIter};
+pub use storage::{LayoutStorage, LayoutStorageMut, MaxLenStorage};
+pub use value_mut::{
+    FixedLayoutOptionMut, FlexibleLayoutOptionMut, LayoutBoolMut, LayoutBoolOptionMut,
+    LayoutCopyMut, LayoutOptionMut, LayoutValueMut,
+};
+pub use variable_slice::{VariableLayoutSlice, VariableLayoutSliceIter};
+
+pub trait DataLayoutKind {
+    const IS_FIXED: bool;
+}
+
+pub trait FixedSizeLayout: Encodable + Decodable {
+    const DATA_LEN: usize;
+}
+
+///
+/// Compile-time encoded length bounds for generated layouts.
+///
+/// `LayoutBounds` lets a parent layout reserve and validate space for nested
+/// prefix-decodable elements whose exact encoded size is known only at runtime.
+///
+pub trait LayoutBounds {
+    const MIN_DATA_LEN: usize;
+    const MAX_DATA_LEN: usize;
+}
+
+impl<T> LayoutBounds for T
+where
+    T: FixedSizeLayout,
+{
+    const MIN_DATA_LEN: usize = T::DATA_LEN;
+    const MAX_DATA_LEN: usize = T::DATA_LEN;
+}
+
+pub trait Encodable {
+    fn encoded_len(&self) -> Result<usize, DataLayoutError>;
+
+    fn encode(&self) -> Result<alloc::vec::Vec<u8>, DataLayoutError> {
+        let mut bytes = ::alloc::vec![0; self.encoded_len()?];
+        self.encode_to(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    ///
+    /// Returns the unwritten buffer
+    ///
+    fn encode_to<'a>(&self, out: &'a mut [u8]) -> Result<&'a mut [u8], DataLayoutError>;
+}
+
+macro_rules! impl_tuple_encodable {
+    ($($name:ident),+ $(,)?) => {
+        impl<$($name),+> Encodable for ($($name,)+)
+        where
+            $($name: Encodable,)+
+        {
+            fn encoded_len(&self) -> Result<usize, DataLayoutError> {
+                #[allow(non_snake_case)]
+                let ($($name,)+) = self;
+
+                let mut len = 0usize;
+                $(
+                    len = len
+                        .checked_add($name.encoded_len()?)
+                        .ok_or(DataLayoutError::LengthExceedsCapacity)?;
+                )+
+                Ok(len)
+            }
+
+            fn encode_to<'a>(&self, out: &'a mut [u8]) -> Result<&'a mut [u8], DataLayoutError> {
+                #[allow(non_snake_case)]
+                let ($($name,)+) = self;
+
+                $(
+                    let out = $name.encode_to(out)?;
+                )+
+                Ok(out)
+            }
+        }
+    };
+}
+
+impl_tuple_encodable!(A);
+impl_tuple_encodable!(A, B);
+impl_tuple_encodable!(A, B, C);
+
+///
+/// Exact-slice decoding.
+///
+/// Exact decoding is required for layouts with implicit `Option` fields, where option
+/// presence is inferred from total encoded length. For example, with valid
+/// lengths `[12, 44]`, a 12-byte `None` value plus 32 unrelated bytes is
+/// indistinguishable from a 44-byte `Some` value unless the caller has already
+/// framed the slice.
+///
+/// Layouts that can safely decode from the front of a larger buffer also
+/// implement `PrefixDecodable`.
+///
+/// `Option<T>` exact decoding treats an empty slice as `None` and a non-empty
+/// slice as `Some(T::decode(bytes)?)`. This is useful for implicitly encoded
+/// options whose absence is known only from the caller's framing.
+///
+pub trait Decodable {
+    type View<'a>;
+
+    ///
+    /// Decodes exactly one value from `bytes`.
+    ///
+    fn decode<'a>(bytes: &'a [u8]) -> Result<Self::View<'a>, DataLayoutError>;
+}
+
+///
+/// Prefix decoding for self-delimiting layouts.
+///
+/// Implementors can decode one value from the front of a larger buffer.
+///
+pub trait PrefixDecodable {
+    type View<'a>;
+
+    ///
+    /// Decodes a prefix and returns the decoded view plus unconsumed bytes.
+    ///
+    fn decode_prefix<'a>(bytes: &'a [u8]) -> Result<(Self::View<'a>, &'a [u8]), DataLayoutError>;
+}
+
+impl<T> Decodable for T
+where
+    T: PrefixDecodable,
+{
+    type View<'a> = <T as PrefixDecodable>::View<'a>;
+
+    fn decode<'a>(bytes: &'a [u8]) -> Result<Self::View<'a>, DataLayoutError> {
+        let (view, remaining) = T::decode_prefix(bytes)?;
+        if !remaining.is_empty() {
+            return Err(DataLayoutError::InvalidDataLength);
+        }
+        Ok(view)
+    }
+}
+
+impl<T> Decodable for Option<T>
+where
+    T: Decodable,
+{
+    type View<'a> = Option<T::View<'a>>;
+
+    fn decode<'a>(bytes: &'a [u8]) -> Result<Self::View<'a>, DataLayoutError> {
+        if bytes.is_empty() {
+            Ok(None)
+        } else {
+            T::decode(bytes).map(Some)
+        }
+    }
+}
