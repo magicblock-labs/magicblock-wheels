@@ -86,6 +86,11 @@ fn max_len_storage_shrinks_exactly() {
 
     assert_eq!(storage.resize_lens(), vec![3]);
     assert_eq!(storage.bytes(), vec![0; 3]);
+
+    max_len_storage.resize(16).unwrap();
+
+    assert_eq!(storage.resize_lens(), vec![3, 16]);
+    assert_eq!(storage.bytes(), vec![0; 16]);
 }
 
 #[fixed_offset_layout(buffer_offset = 1)]
@@ -96,6 +101,8 @@ struct FixedOffsetOneCopyArgs {
 
 #[test]
 fn fixed_offset_layout_validates_buffer_offset() {
+    assert_eq!(FixedOffsetOneCopyArgs::DATA_LEN, 12);
+
     let mut aligned = Aligned([0; FixedOffsetOneCopyArgs::DATA_LEN + 1]);
     let bytes = &mut aligned.0;
     bytes[1..9].copy_from_slice(&55_u64.to_le_bytes());
@@ -402,6 +409,8 @@ struct FlexibleVariableNestedOptionArgs {
 
 #[test]
 fn fixed_offset_layout_supports_flexible_variable_nested_option() {
+    assert_eq!(NestedVariableConfig::MIN_DATA_LEN, 1);
+    assert_eq!(NestedVariableConfig::MAX_DATA_LEN, 257);
     assert_eq!(FlexibleVariableNestedOptionArgs::MIN_DATA_LEN, 1);
     assert_eq!(FlexibleVariableNestedOptionArgs::MAX_DATA_LEN, 259);
 
@@ -872,6 +881,9 @@ struct FixedTrailingByteVecArgs {
 
 #[test]
 fn fixed_offset_layout_extends_trailing_extendable_vec_from_slice() {
+    assert_eq!(FixedTrailingByteVecArgs::MIN_DATA_LEN, 1);
+    assert_eq!(FixedTrailingByteVecArgs::MAX_DATA_LEN, 257);
+
     let storage = TestStorage::new(vec![7]);
     let mut view = FixedTrailingByteVecArgs::decode_mut(&storage).unwrap();
 
@@ -1006,6 +1018,9 @@ struct FixedTrailingU16VecArgs {
 
 #[test]
 fn fixed_offset_layout_extends_trailing_extendable_vec_from_non_u8_slice() {
+    assert_eq!(FixedTrailingU16VecArgs::MIN_DATA_LEN, 1);
+    assert_eq!(FixedTrailingU16VecArgs::MAX_DATA_LEN, 512);
+
     let storage = TestStorage::new(vec![5]);
     let mut view = FixedTrailingU16VecArgs::decode_mut(&storage).unwrap();
 
