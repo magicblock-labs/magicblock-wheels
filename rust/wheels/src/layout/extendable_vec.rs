@@ -177,7 +177,10 @@ impl<'a, T, S: ?Sized, K> ExtendableVec<'a, T, S, K> {
         self.len
     }
 
-    /// Returns the number of elements that fit in the backing storage.
+    /// Returns how many elements the vector can hold in its current storage.
+    ///
+    /// This counts both occupied and spare slots, up to the supported element
+    /// limit for the length header.
     pub fn capacity(&self) -> usize {
         self.capacity
     }
@@ -226,7 +229,12 @@ impl<'a, T, K> ExtendableVec<'a, T, (), K> {
         &self.all_bytes()[self.offset..]
     }
 
-    /// Returns the number of bytes in the trailing storage region.
+    /// Returns the byte count from the start of this field to the end of the buffer.
+    ///
+    /// This includes the length header, when present, and all occupied and spare
+    /// slots. With a two-byte header and four `u16` slots, [`capacity()`](Self::capacity)
+    /// is 4 and `storage_len()` is `2 + 4 * 2 = 10` bytes. An empty vector
+    /// encoded without a header uses zero bytes.
     pub fn storage_len(&self) -> usize {
         self.storage_bytes().len()
     }
@@ -438,7 +446,12 @@ impl<'a, T, S, K> ExtendableVec<'a, T, S, K>
 where
     S: LayoutStorageMut + ?Sized,
 {
-    /// Returns the number of bytes in the trailing storage region.
+    /// Returns the byte count from the start of this field to the end of storage.
+    ///
+    /// This includes the length header, when present, and the bytes for every
+    /// occupied and spare slot. [`capacity()`](Self::capacity) counts elements.
+    /// [`clear()`](Self::clear) keeps the allocated slots and header, so an empty
+    /// vector can still have a nonzero storage length.
     pub fn storage_len(&self) -> usize {
         self.storage()
             .map(|storage| storage.data_len().saturating_sub(self.offset))
