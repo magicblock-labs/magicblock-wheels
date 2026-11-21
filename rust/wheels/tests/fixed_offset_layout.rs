@@ -219,6 +219,45 @@ fn flexible_option_round_trips_a_fixed_size_child() {
 }
 
 #[fixed_offset_layout(buffer_offset = unknown)]
+struct FlexiblePubkeyArgs {
+    header: u8,
+    #[flexible]
+    key: Option<Pubkey>,
+}
+
+#[test]
+fn flexible_pubkey_round_trips_after_set_and_clear() {
+    assert_eq!(FlexiblePubkeyArgs::MIN_DATA_LEN, 1);
+    assert_eq!(FlexiblePubkeyArgs::MAX_DATA_LEN, 34);
+
+    let storage = TestStorage::new(vec![7]);
+    for key in [Some(Pubkey::from([4; 32])), None] {
+        let mut view = FlexiblePubkeyArgs::decode_mut(&storage).unwrap();
+        view.key_mut().unwrap().set(key).unwrap();
+
+        let bytes = storage.borrow_data().unwrap();
+        let decoded = FlexiblePubkeyArgs::decode(&bytes).unwrap();
+        assert_eq!(decoded.header(), 7);
+        assert_eq!(decoded.key(), key.as_ref());
+    }
+}
+
+#[test]
+fn flexible_pubkey_rejects_invalid_tag_and_truncated_key() {
+    let mut bytes = [7; FlexiblePubkeyArgs::MAX_DATA_LEN];
+    for (tag, key_bytes, expected) in [
+        (0, 32, DataLayoutError::InvalidOptionTag),
+        (1, 8, DataLayoutError::TruncatedPayload),
+    ] {
+        bytes[1] = tag;
+        assert_eq!(
+            FlexiblePubkeyArgs::decode(&bytes[..2 + key_bytes]).unwrap_err(),
+            expected
+        );
+    }
+}
+
+#[fixed_offset_layout(buffer_offset = unknown)]
 struct BytePayload {
     version: u8,
     #[extendable = 1]
