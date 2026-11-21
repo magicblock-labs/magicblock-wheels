@@ -1,498 +1,210 @@
-use core::{
-    marker::PhantomData,
-    ops::{Deref, DerefMut},
-};
+use core::marker::PhantomData;
 
 use bytemuck::Pod;
 use pinocchio::error::ProgramError;
 
-use super::{Encodable, FixedSizeLayout, LayoutBounds, LayoutStorageMut};
+use super::{Encodable, FixedSizeLayout, LayoutBounds, LayoutWriteGuard};
 use crate::DataLayoutError;
 
-// CHECKPOINT(CU): generated fixed-layout getters pass compile-time constant
-// field offsets into these generic mutable helpers. We store those offsets as
-// runtime `usize` fields to keep the helper API small and avoid const-generic
-// return types or field-specific generated wrappers. If CU measurements show
-// this matters for very small budgets, benchmark const-generic offsets.
-
-/// Mutable typed view over an aligned fixed-value layout field.
-///
-/// This guard owns the backing storage borrow, so callers can use it like a
-/// normal `&mut T` through [`DerefMut`] without returning a dangling reference
-/// into account data.
-pub struct LayoutValueMut<'a, S, T>
-where
-    S: LayoutStorageMut + ?Sized + 'a,
-    T: Pod,
-{
-    bytes: S::RefMut<'a>,
-    offset: usize,
+/// Mutable byte-copy slot for a fixed-value field with no alignment guarantee.
+pub struct LayoutCopyMut<'a, T> {
+    bytes: &'a mut [u8],
     _marker: PhantomData<T>,
 }
 
-impl<'a, S, T> LayoutValueMut<'a, S, T>
-where
-    S: LayoutStorageMut + ?Sized + 'a,
-    T: Pod,
-{
+impl<'a, T: Pod> LayoutCopyMut<'a, T> {
     #[doc(hidden)]
-    pub fn new(storage: &'a S, offset: usize) -> Result<Self, ProgramError> {
-        let bytes = storage.borrow_data_mut()?;
-        let end = checked_end(offset, core::mem::size_of::<T>())?;
-        if bytes.len() < end {
-            return Err(DataLayoutError::InvalidDataLength.into());
-        }
-
-        let ptr = bytes[offset..end].as_ptr() as usize;
-        let align = core::mem::align_of::<T>();
-        if align > 1 && !ptr.is_multiple_of(align) {
-            return Err(DataLayoutError::InvalidFieldAlignment.into());
-        }
-
-        Ok(Self {
+    pub fn new(bytes: &'a mut [u8]) -> Self {
+        Self {
             bytes,
-            offset,
             _marker: PhantomData,
-        })
+        }
     }
 
-    fn range(&self) -> core::ops::Range<usize> {
-        let end = self.offset + core::mem::size_of::<T>();
-        self.offset..end
-    }
-}
-
-impl<'a, S, T> Deref for LayoutValueMut<'a, S, T>
-where
-    S: LayoutStorageMut + ?Sized + 'a,
-    T: Pod,
-{
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        bytemuck::from_bytes(&self.bytes[self.range()])
-    }
-}
-
-impl<'a, S, T> DerefMut for LayoutValueMut<'a, S, T>
-where
-    S: LayoutStorageMut + ?Sized + 'a,
-    T: Pod,
-{
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        let range = self.range();
-        bytemuck::from_bytes_mut(&mut self.bytes[range])
-    }
-}
-
-/// Mutable byte-copy slot for fixed-value fields that cannot be borrowed as
-/// aligned `&mut T`.
-pub struct LayoutCopyMut<'a, S, T>
-where
-    S: LayoutStorageMut + ?Sized,
-    T: Pod,
-{
-    storage: &'a S,
-    offset: usize,
-    _marker: PhantomData<T>,
-}
-
-impl<'a, S, T> LayoutCopyMut<'a, S, T>
-where
-    S: LayoutStorageMut + ?Sized,
-    T: Pod,
-{
-    #[doc(hidden)]
-    pub fn new(storage: &'a S, offset: usize) -> Result<Self, ProgramError> {
-        let bytes = storage.borrow_data()?;
-        ensure_range(&bytes, offset, core::mem::size_of::<T>())?;
-        drop(bytes);
-
-        Ok(Self {
-            storage,
-            offset,
-            _marker: PhantomData,
-        })
+    pub fn get(&self) -> T {
+        bytemuck::pod_read_unaligned(self.bytes)
     }
 
-    pub fn get(&self) -> Result<T, ProgramError> {
-        let bytes = self.storage.borrow_data()?;
-        let end = checked_end(self.offset, core::mem::size_of::<T>())?;
-        Ok(bytemuck::pod_read_unaligned(&bytes[self.offset..end]))
-    }
-
-    pub fn set(&mut self, value: T) -> Result<(), ProgramError> {
-        let mut bytes = self.storage.borrow_data_mut()?;
-        let end = checked_end(self.offset, core::mem::size_of::<T>())?;
-        bytes[self.offset..end].copy_from_slice(bytemuck::bytes_of(&value));
-        Ok(())
+    pub fn set(&mut self, value: T) {
+        self.bytes.copy_from_slice(bytemuck::bytes_of(&value));
     }
 }
 
 /// Mutable slot for a layout-encoded `bool`.
-///
-/// The encoded representation is a backing `u8`, not Rust's in-memory `bool`
-/// representation, so this type exposes `get`/`set` instead of `DerefMut`.
-pub struct LayoutBoolMut<'a, S>
-where
-    S: LayoutStorageMut + ?Sized,
-{
-    storage: &'a S,
+pub struct LayoutBoolMut<'a>(&'a mut u8);
+
+impl<'a> LayoutBoolMut<'a> {
+    #[doc(hidden)]
+    pub fn new(byte: &'a mut u8) -> Self {
+        Self(byte)
+    }
+
+    pub fn get(&self) -> bool {
+        *self.0 != 0
+    }
+
+    pub fn set(&mut self, value: bool) {
+        *self.0 = u8::from(value);
+    }
+}
+
+/// A trailing option borrows the guard so it can resize its payload.
+pub struct FlexibleOptionBytes<'a, G> {
+    bytes: &'a mut G,
     offset: usize,
 }
 
-impl<'a, S> LayoutBoolMut<'a, S>
-where
-    S: LayoutStorageMut + ?Sized,
-{
+impl<'a, G: LayoutWriteGuard> FlexibleOptionBytes<'a, G> {
     #[doc(hidden)]
-    pub fn new(storage: &'a S, offset: usize) -> Result<Self, ProgramError> {
-        let bytes = storage.borrow_data()?;
-        ensure_range(&bytes, offset, 1)?;
-        drop(bytes);
-
-        Ok(Self { storage, offset })
+    pub fn new(bytes: &'a mut G, offset: usize) -> Self {
+        Self { bytes, offset }
     }
 
-    pub fn get(&self) -> Result<bool, ProgramError> {
-        let bytes = self.storage.borrow_data()?;
-        ensure_range(&bytes, self.offset, 1)?;
-        Ok(bytes[self.offset] != 0)
+    fn resize(&mut self, payload_len: Option<usize>) -> Result<&mut [u8], ProgramError> {
+        let len = match payload_len {
+            Some(len) => self
+                .offset
+                .checked_add(1)
+                .and_then(|start| start.checked_add(len))
+                .ok_or(DataLayoutError::InvalidDataLength)?,
+            None => self.offset,
+        };
+        self.bytes.resize(len)?;
+        Ok(&mut self.bytes[self.offset..])
     }
+}
 
-    pub fn set(&mut self, value: bool) -> Result<(), ProgramError> {
-        let mut bytes = self.storage.borrow_data_mut()?;
-        ensure_range(&bytes, self.offset, 1)?;
-        bytes[self.offset] = u8::from(value);
-        Ok(())
+impl<G: LayoutWriteGuard> AsRef<[u8]> for FlexibleOptionBytes<'_, G> {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes[self.offset..]
     }
 }
 
 /// Mutable slot for a layout-encoded `Option<T>`.
-///
-/// The encoded representation is a tag byte plus payload bytes, so this type
-/// exposes `get`/`set` instead of `DerefMut<Target = Option<T>>`.
-pub struct LayoutOptionMut<'a, S, T>
-where
-    S: LayoutStorageMut + ?Sized,
-    T: Pod,
-{
-    storage: &'a S,
-    offset: usize,
-    flexible: bool,
+pub struct LayoutOptionMut<B, T> {
+    slot: B,
     _marker: PhantomData<T>,
 }
 
-impl<'a, S, T> LayoutOptionMut<'a, S, T>
-where
-    S: LayoutStorageMut + ?Sized,
-    T: Pod,
-{
+impl<B: AsRef<[u8]>, T: Pod> LayoutOptionMut<B, T> {
     #[doc(hidden)]
-    pub fn new_fixed(storage: &'a S, offset: usize) -> Result<Self, ProgramError> {
-        let bytes = storage.borrow_data()?;
-        ensure_range(&bytes, offset, 1 + core::mem::size_of::<T>())?;
-        drop(bytes);
-
-        Ok(Self {
-            storage,
-            offset,
-            flexible: false,
+    pub fn new(slot: B) -> Self {
+        Self {
+            slot,
             _marker: PhantomData,
-        })
+        }
     }
 
-    #[doc(hidden)]
-    pub fn new_flexible(storage: &'a S, offset: usize) -> Result<Self, ProgramError> {
-        let bytes = storage.borrow_data()?;
-        if bytes.len() != offset {
-            ensure_range(&bytes, offset, 1 + core::mem::size_of::<T>())?;
-        }
-        drop(bytes);
-
-        Ok(Self {
-            storage,
-            offset,
-            flexible: true,
-            _marker: PhantomData,
-        })
+    pub fn get(&self) -> Option<T> {
+        let (tag, payload) = self.slot.as_ref().split_first()?;
+        (*tag == 1).then(|| bytemuck::pod_read_unaligned(payload))
     }
+}
 
-    pub fn get(&self) -> Result<Option<T>, ProgramError> {
-        let bytes = self.storage.borrow_data()?;
-        if self.flexible && bytes.len() == self.offset {
-            return Ok(None);
+impl<T: Pod> LayoutOptionMut<&mut [u8], T> {
+    pub fn set(&mut self, value: Option<T>) {
+        self.slot[0] = u8::from(value.is_some());
+        if let Some(value) = value {
+            self.slot[1..].copy_from_slice(bytemuck::bytes_of(&value));
         }
-
-        ensure_range(&bytes, self.offset, 1)?;
-        if bytes[self.offset] == 0 {
-            return Ok(None);
-        }
-        if bytes[self.offset] != 1 {
-            return Err(DataLayoutError::InvalidOptionTag.into());
-        }
-
-        let start = self.offset + 1;
-        let end = checked_end(start, core::mem::size_of::<T>())?;
-        if bytes.len() < end {
-            return Err(DataLayoutError::TruncatedPayload.into());
-        }
-        Ok(Some(bytemuck::pod_read_unaligned(&bytes[start..end])))
     }
+}
 
+impl<G: LayoutWriteGuard, T: Pod> LayoutOptionMut<FlexibleOptionBytes<'_, G>, T> {
     pub fn set(&mut self, value: Option<T>) -> Result<(), ProgramError> {
-        match value {
-            Some(value) => self.set_some(value),
-            None => self.set_none(),
+        let slot = self
+            .slot
+            .resize(value.as_ref().map(core::mem::size_of_val))?;
+        if let Some(value) = value {
+            LayoutOptionMut::new(slot).set(Some(value));
         }
-    }
-
-    fn set_some(&mut self, value: T) -> Result<(), ProgramError> {
-        let value_size = core::mem::size_of::<T>();
-        let end = checked_end(self.offset + 1, value_size)?;
-        if self.flexible {
-            self.storage.resize(end)?;
-        }
-
-        let mut bytes = self.storage.borrow_data_mut()?;
-        ensure_range(&bytes, self.offset, 1 + value_size)?;
-        bytes[self.offset + 1..end].copy_from_slice(bytemuck::bytes_of(&value));
-        bytes[self.offset] = 1;
-        Ok(())
-    }
-
-    fn set_none(&mut self) -> Result<(), ProgramError> {
-        if self.flexible {
-            self.storage.resize(self.offset)?;
-            return Ok(());
-        }
-
-        let mut bytes = self.storage.borrow_data_mut()?;
-        ensure_range(&bytes, self.offset, 1)?;
-        bytes[self.offset] = 0;
         Ok(())
     }
 }
 
-/// Mutable slot for an `Option<T>` whose payload is a fixed-size layout.
-///
-/// Nested layouts are encoded field-by-field, so this helper replaces the
-/// complete nested value instead of treating its Rust representation as bytes.
-pub struct FixedLayoutOptionMut<'a, S, T>
-where
-    S: LayoutStorageMut + ?Sized,
-    T: FixedSizeLayout,
-{
-    storage: &'a S,
-    offset: usize,
+/// Mutable option slot whose payload is a boolean encoded as one byte.
+pub struct LayoutBoolOptionMut<B>(LayoutOptionMut<B, u8>);
+
+impl<B: AsRef<[u8]>> LayoutBoolOptionMut<B> {
+    #[doc(hidden)]
+    pub fn new(slot: B) -> Self {
+        Self(LayoutOptionMut::new(slot))
+    }
+
+    pub fn get(&self) -> Option<bool> {
+        self.0.get().map(|byte| byte != 0)
+    }
+}
+
+impl LayoutBoolOptionMut<&mut [u8]> {
+    pub fn set(&mut self, value: Option<bool>) {
+        self.0.set(value.map(u8::from));
+    }
+}
+
+impl<G: LayoutWriteGuard> LayoutBoolOptionMut<FlexibleOptionBytes<'_, G>> {
+    pub fn set(&mut self, value: Option<bool>) -> Result<(), ProgramError> {
+        self.0.set(value.map(u8::from))
+    }
+}
+
+/// Mutable slot for an option containing a fixed-size nested layout.
+pub struct FixedLayoutOptionMut<'a, T> {
+    slot: &'a mut [u8],
     _marker: PhantomData<T>,
 }
 
-impl<'a, S, T> FixedLayoutOptionMut<'a, S, T>
-where
-    S: LayoutStorageMut + ?Sized,
-    T: FixedSizeLayout,
-{
+impl<'a, T: FixedSizeLayout> FixedLayoutOptionMut<'a, T> {
     #[doc(hidden)]
-    pub fn new(storage: &'a S, offset: usize) -> Result<Self, ProgramError> {
-        let bytes = storage.borrow_data()?;
-        ensure_range(&bytes, offset, 1 + T::DATA_LEN)?;
-        drop(bytes);
-
-        Ok(Self {
-            storage,
-            offset,
+    pub fn new(slot: &'a mut [u8]) -> Self {
+        Self {
+            slot,
             _marker: PhantomData,
-        })
+        }
     }
 
     pub fn set(&mut self, value: Option<&T>) -> Result<(), ProgramError> {
-        match value {
-            Some(value) => self.set_some(value),
-            None => self.set_none(),
-        }
-    }
-
-    fn set_some(&mut self, value: &T) -> Result<(), ProgramError> {
-        let start = self.offset + 1;
-        let end = checked_end(start, T::DATA_LEN)?;
-        let mut bytes = self.storage.borrow_data_mut()?;
-        ensure_range(&bytes, self.offset, 1 + T::DATA_LEN)?;
-        let remaining = value
-            .encode_to(&mut bytes[start..end])
-            .map_err(ProgramError::from)?;
-        if !remaining.is_empty() {
-            return Err(DataLayoutError::InvalidDataLength.into());
-        }
-        bytes[self.offset] = 1;
-        Ok(())
-    }
-
-    fn set_none(&mut self) -> Result<(), ProgramError> {
-        let mut bytes = self.storage.borrow_data_mut()?;
-        ensure_range(&bytes, self.offset, 1)?;
-        bytes[self.offset] = 0;
-        Ok(())
+        write_nested_option(self.slot, value)
     }
 }
 
-/// Mutable slot for a final flexible `Option<T>` containing a nested layout.
-pub struct FlexibleLayoutOptionMut<'a, S, T>
-where
-    S: LayoutStorageMut + ?Sized,
-    T: Encodable + LayoutBounds,
-{
-    storage: &'a S,
-    offset: usize,
+/// Mutable slot for a final flexible option containing a nested layout.
+pub struct FlexibleLayoutOptionMut<'a, G, T> {
+    slot: FlexibleOptionBytes<'a, G>,
     _marker: PhantomData<T>,
 }
 
-impl<'a, S, T> FlexibleLayoutOptionMut<'a, S, T>
-where
-    S: LayoutStorageMut + ?Sized,
-    T: Encodable + LayoutBounds,
-{
+impl<'a, G: LayoutWriteGuard, T: Encodable + LayoutBounds> FlexibleLayoutOptionMut<'a, G, T> {
     #[doc(hidden)]
-    pub fn new(storage: &'a S, offset: usize) -> Result<Self, ProgramError> {
-        if storage.data_len() < offset {
-            return Err(DataLayoutError::InvalidDataLength.into());
-        }
-        Ok(Self {
-            storage,
-            offset,
+    pub fn new(slot: FlexibleOptionBytes<'a, G>) -> Self {
+        Self {
+            slot,
             _marker: PhantomData,
-        })
+        }
     }
 
     pub fn set(&mut self, value: Option<&T>) -> Result<(), ProgramError> {
         let Some(value) = value else {
-            return self.storage.resize(self.offset);
-        };
-
-        let value_len = value.encoded_len().map_err(ProgramError::from)?;
-        if !(T::MIN_DATA_LEN..=T::MAX_DATA_LEN).contains(&value_len) {
-            return Err(DataLayoutError::InvalidDataLength.into());
-        }
-
-        let start = checked_end(self.offset, 1)?;
-        let end = checked_end(start, value_len)?;
-        self.storage.resize(end)?;
-
-        let mut bytes = self.storage.borrow_data_mut()?;
-        ensure_range(&bytes, self.offset, 1 + value_len)?;
-        let remaining = value
-            .encode_to(&mut bytes[start..end])
-            .map_err(ProgramError::from)?;
-        if !remaining.is_empty() {
-            return Err(DataLayoutError::InvalidDataLength.into());
-        }
-        bytes[self.offset] = 1;
-        Ok(())
-    }
-}
-
-/// Mutable slot for a layout-encoded `Option<bool>`.
-pub struct LayoutBoolOptionMut<'a, S>
-where
-    S: LayoutStorageMut + ?Sized,
-{
-    storage: &'a S,
-    offset: usize,
-    flexible: bool,
-}
-
-impl<'a, S> LayoutBoolOptionMut<'a, S>
-where
-    S: LayoutStorageMut + ?Sized,
-{
-    #[doc(hidden)]
-    pub fn new_fixed(storage: &'a S, offset: usize) -> Result<Self, ProgramError> {
-        let bytes = storage.borrow_data()?;
-        ensure_range(&bytes, offset, 2)?;
-        drop(bytes);
-
-        Ok(Self {
-            storage,
-            offset,
-            flexible: false,
-        })
-    }
-
-    #[doc(hidden)]
-    pub fn new_flexible(storage: &'a S, offset: usize) -> Result<Self, ProgramError> {
-        let bytes = storage.borrow_data()?;
-        if bytes.len() != offset {
-            ensure_range(&bytes, offset, 2)?;
-        }
-        drop(bytes);
-
-        Ok(Self {
-            storage,
-            offset,
-            flexible: true,
-        })
-    }
-
-    pub fn get(&self) -> Result<Option<bool>, ProgramError> {
-        let bytes = self.storage.borrow_data()?;
-        if self.flexible && bytes.len() == self.offset {
-            return Ok(None);
-        }
-
-        ensure_range(&bytes, self.offset, 1)?;
-        if bytes[self.offset] == 0 {
-            return Ok(None);
-        }
-        if bytes[self.offset] != 1 {
-            return Err(DataLayoutError::InvalidOptionTag.into());
-        }
-
-        ensure_range(&bytes, self.offset + 1, 1)?;
-        Ok(Some(bytes[self.offset + 1] != 0))
-    }
-
-    pub fn set(&mut self, value: Option<bool>) -> Result<(), ProgramError> {
-        match value {
-            Some(value) => self.set_some(value),
-            None => self.set_none(),
-        }
-    }
-
-    fn set_some(&mut self, value: bool) -> Result<(), ProgramError> {
-        if self.flexible {
-            self.storage.resize(self.offset + 2)?;
-        }
-
-        let mut bytes = self.storage.borrow_data_mut()?;
-        ensure_range(&bytes, self.offset, 2)?;
-        bytes[self.offset + 1] = u8::from(value);
-        bytes[self.offset] = 1;
-        Ok(())
-    }
-
-    fn set_none(&mut self) -> Result<(), ProgramError> {
-        if self.flexible {
-            self.storage.resize(self.offset)?;
+            self.slot.resize(None)?;
             return Ok(());
+        };
+        let len = value.encoded_len()?;
+        if !(T::MIN_DATA_LEN..=T::MAX_DATA_LEN).contains(&len) {
+            return Err(DataLayoutError::InvalidDataLength.into());
         }
-
-        let mut bytes = self.storage.borrow_data_mut()?;
-        ensure_range(&bytes, self.offset, 1)?;
-        bytes[self.offset] = 0;
-        Ok(())
+        write_nested_option(self.slot.resize(Some(len))?, Some(value))
     }
 }
 
-fn checked_end(offset: usize, len: usize) -> Result<usize, ProgramError> {
-    offset
-        .checked_add(len)
-        .ok_or(DataLayoutError::InvalidDataLength.into())
-}
-
-fn ensure_range(bytes: &[u8], offset: usize, len: usize) -> Result<(), ProgramError> {
-    let end = checked_end(offset, len)?;
-    if bytes.len() < end {
-        return Err(DataLayoutError::InvalidDataLength.into());
+fn write_nested_option<T: Encodable>(
+    slot: &mut [u8],
+    value: Option<&T>,
+) -> Result<(), ProgramError> {
+    if let Some(value) = value {
+        if !value.encode_to(&mut slot[1..])?.is_empty() {
+            return Err(DataLayoutError::InvalidDataLength.into());
+        }
     }
+    slot[0] = u8::from(value.is_some());
     Ok(())
 }

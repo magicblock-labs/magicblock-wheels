@@ -13,7 +13,7 @@
 //! extendable Vec in `fixed_offset_layout`, generated getters return
 //! [`ExtendableVec`] so callers can see both active `len` and backing storage
 //! `capacity`. Generated mutable views use helper types like
-//! [`LayoutValueMut`] and [`FixedCapacityVec`] so account storage can be
+//! [`LayoutCopyMut`] and [`FixedCapacityVec`] so account storage can be
 //! updated without rebuilding an owned value.
 //!
 //! # Why Layouts Exist
@@ -132,24 +132,22 @@
 //! `len` within reserved storage, and trailing extendable fields can resize the
 //! backing storage when their encoded length changes.
 //!
-//! Generated mutable views expose `<field>_mut()` helpers instead of returning
-//! the same values as immutable getters. This matters because account data is
-//! borrowed through a storage guard; a mutable helper either owns that borrow
-//! guard or performs short-lived `get`/`set` operations. It also avoids
-//! treating encoded layouts like normal Rust layouts: encoded `bool`,
-//! `Option<T>`, and `Vec<T>` are byte-level layouts, not Rust `bool`,
-//! `Option<T>`, or `Vec<T>` values in memory.
+//! `decode_mut` takes one exclusive borrow and validates its bytes. Each
+//! `<field>_mut()` borrows from that view. After the last use of a field handle,
+//! you can edit another field or resize a trailing field through the same view.
+//! Use `view.bytes()` to inspect the buffer, or drop the view to borrow the
+//! storage independently. A failed resize leaves the view usable.
 //!
 //! | Field form in `fixed_offset_layout` | Generated mutable helper | Mutation behavior |
 //! |---|---|---|
-//! | Aligned integer primitives, [`Pubkey`](crate::Pubkey)/`Address`, and fixed-size integer arrays | [`LayoutValueMut`] | Owns the storage borrow and implements `DerefMut<Target = T>` for direct in-place updates.<br><br>`*view.amount_mut()? += 1;` |
-//! | Unaligned integer primitives or fixed-size integer arrays | [`LayoutCopyMut`] | Exposes `get()` and `set(value)` and writes bytes without creating an invalid `&mut T`.<br><br>`view.amount_mut()?.set(42)?;` |
-//! | `bool` | [`LayoutBoolMut`] | Exposes `get()` and `set(bool)` because the encoded form is a backing `u8`.<br><br>`view.enabled_mut()?.set(true)?;` |
-//! | Fixed `Option<T>` | [`LayoutOptionMut`] or [`LayoutBoolOptionMut`] | Updates the tag and payload in place; the reserved option slot size does not change.<br><br>`view.authority_mut()?.set(Some(key))?;` |
-//! | Trailing flexible `Option<T>` | [`LayoutOptionMut`] or [`LayoutBoolOptionMut`] | `None` resizes storage back to the field offset; `Some` resizes to tag plus payload length.<br><br>`view.delegate_mut()?.set(None)?;` |
-//! | Final `Option<T>` with a nested layout | [`FixedLayoutOptionMut`] or [`FlexibleLayoutOptionMut`] | Encodes a replacement nested value directly into storage. A normal option requires `T: FixedSizeLayout` and retains its reserved payload bytes; `#[flexible]` accepts any bounded nested layout and resizes storage to its encoded length.<br><br>`view.config_mut()?.set(Some(&config))?;` |
-//! | `#[capacity = N] Vec<T>` | [`FixedCapacityVec`] | Can `push`, `pop`, `set`, `truncate`, and `clear` active elements up to schema capacity `N`; it never resizes storage.<br><br>`view.items_mut()?.push(item)?;` |
-//! | Final `#[extendable = N] Vec<T>` | [`ExtendableVec`] | Can `push`, `extend_from_slice`, `pop`, `set`, `truncate`, and `clear`; it may resize storage to grow capacity because the field is trailing.<br><br>`view.tail_mut()?.push(item)?;` |
+//! | Aligned integer primitives, [`Pubkey`](crate::Pubkey)/`Address`, and fixed-size integer arrays | `&mut T` | Borrows the aligned field directly.<br><br>`*view.amount_mut() += 1;` |
+//! | Unaligned integer primitives or fixed-size integer arrays | [`LayoutCopyMut`] | Exposes `get()` and `set(value)` and writes bytes without creating an invalid `&mut T`.<br><br>`view.amount_mut().set(42);` |
+//! | `bool` | [`LayoutBoolMut`] | Exposes `get()` and `set(bool)` because the encoded form is a backing `u8`.<br><br>`view.enabled_mut().set(true);` |
+//! | Fixed `Option<T>` | [`LayoutOptionMut`] or [`LayoutBoolOptionMut`] | Updates the tag and payload in place; the reserved option slot size does not change.<br><br>`view.authority_mut().set(Some(key));` |
+//! | Trailing flexible `Option<T>` | [`LayoutOptionMut`] or [`LayoutBoolOptionMut`] | `None` resizes storage back to the field offset; `Some` resizes to tag plus payload length.<br><br>`view.delegate_mut().set(None)?;` |
+//! | Final `Option<T>` with a nested layout | [`FixedLayoutOptionMut`] or [`FlexibleLayoutOptionMut`] | Encodes a replacement nested value directly into storage. A normal option requires `T: FixedSizeLayout` and retains its reserved payload bytes; `#[flexible]` accepts any bounded nested layout and resizes storage to its encoded length.<br><br>`view.config_mut().set(Some(&config))?;` |
+//! | `#[capacity = N] Vec<T>` | [`FixedCapacityVec`] | Can `push`, `pop`, `set`, `truncate`, and `clear` active elements up to schema capacity `N`; it never resizes storage.<br><br>`view.items_mut().push(item)?;` |
+//! | Final `#[extendable = N] Vec<T>` | [`ExtendableVec`] | Can `push`, `extend_from_slice`, `pop`, `set`, `truncate`, and `clear`; it may resize storage to grow capacity because the field is trailing.<br><br>`view.tail_mut().push(item)?;` |
 //!
 //! In other words, only a trailing extendable Vec can expand its backing
 //! capacity. A non-trailing fixed-capacity Vec can still expand its active
@@ -223,10 +221,10 @@ pub use extendable_vec::{
 };
 pub use fixed_capacity_vec::FixedCapacityVec;
 pub use fixed_slice::{FixedLayoutSlice, FixedLayoutSliceIter};
-pub use storage::{LayoutStorage, LayoutStorageMut, MaxLenStorage};
+pub use storage::{LayoutStorage, LayoutStorageMut, LayoutWriteGuard, MaxLenStorage};
 pub use value_mut::{
-    FixedLayoutOptionMut, FlexibleLayoutOptionMut, LayoutBoolMut, LayoutBoolOptionMut,
-    LayoutCopyMut, LayoutOptionMut, LayoutValueMut,
+    FixedLayoutOptionMut, FlexibleLayoutOptionMut, FlexibleOptionBytes, LayoutBoolMut,
+    LayoutBoolOptionMut, LayoutCopyMut, LayoutOptionMut,
 };
 pub use variable_slice::{VariableLayoutSlice, VariableLayoutSliceIter};
 

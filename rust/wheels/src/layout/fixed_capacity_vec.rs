@@ -4,8 +4,7 @@ use bytemuck::Pod;
 use pinocchio::error::ProgramError;
 
 use super::{
-    Encodable, FixedLayoutElement, FixedSizeLayout, FixedValueElement, LayoutStorageMut,
-    MAX_SUPPORTED_VEC_LEN,
+    Encodable, FixedLayoutElement, FixedSizeLayout, FixedValueElement, MAX_SUPPORTED_VEC_LEN,
 };
 use crate::DataLayoutError;
 
@@ -21,8 +20,8 @@ use crate::DataLayoutError;
 /// runtime fields to keep return types simple. If CU measurements show this
 /// matters for very small budgets, benchmark const-generic offsets/metadata or
 /// field-specific generated wrappers.
-pub struct FixedCapacityVec<'a, T, S: ?Sized, K = FixedValueElement> {
-    storage: &'a S,
+pub struct FixedCapacityVec<'a, T, K = FixedValueElement> {
+    bytes: &'a mut [u8],
     offset: usize,
     len_width: usize,
     elem_size: usize,
@@ -31,80 +30,27 @@ pub struct FixedCapacityVec<'a, T, S: ?Sized, K = FixedValueElement> {
     _marker: PhantomData<(T, K)>,
 }
 
-impl<'a, T, S> FixedCapacityVec<'a, T, S, FixedValueElement>
-where
-    S: LayoutStorageMut + ?Sized,
-{
+impl<'a, T, K> FixedCapacityVec<'a, T, K> {
     #[doc(hidden)]
-    pub fn new_fixed_value_storage(
-        storage: &'a S,
+    pub fn new(
+        bytes: &'a mut [u8],
         offset: usize,
         len_width: usize,
         elem_size: usize,
         capacity: usize,
-    ) -> Result<Self, ProgramError> {
-        let bytes = storage.borrow_data()?;
-        validate_storage_len(bytes.len(), offset, len_width, elem_size, capacity)?;
-        let len = read_len_header(&bytes, offset, len_width)?;
-        if len > capacity {
-            return Err(DataLayoutError::LengthExceedsCapacity.into());
-        }
-        drop(bytes);
-
-        Ok(Self {
-            storage,
+    ) -> Self {
+        let len = read_len_header(bytes, offset, len_width).expect("validated Vec length");
+        Self {
+            bytes,
             offset,
             len_width,
             elem_size,
             len,
             capacity,
             _marker: PhantomData,
-        })
-    }
-}
-
-impl<'a, T, S> FixedCapacityVec<'a, T, S, FixedLayoutElement>
-where
-    S: LayoutStorageMut + ?Sized,
-{
-    #[doc(hidden)]
-    pub fn new_fixed_layout_storage(
-        storage: &'a S,
-        offset: usize,
-        len_width: usize,
-        elem_size: usize,
-        capacity: usize,
-    ) -> Result<Self, ProgramError>
-    where
-        T: FixedSizeLayout,
-    {
-        let bytes = storage.borrow_data()?;
-        validate_storage_len(bytes.len(), offset, len_width, elem_size, capacity)?;
-        let len = read_len_header(&bytes, offset, len_width)?;
-        if len > capacity {
-            return Err(DataLayoutError::LengthExceedsCapacity.into());
         }
-
-        let data_start = offset + len_width;
-        let active_end = data_start + len * elem_size;
-        for chunk in bytes[data_start..active_end].chunks_exact(T::DATA_LEN) {
-            T::decode(chunk).map_err(ProgramError::from)?;
-        }
-        drop(bytes);
-
-        Ok(Self {
-            storage,
-            offset,
-            len_width,
-            elem_size,
-            len,
-            capacity,
-            _marker: PhantomData,
-        })
     }
-}
 
-impl<'a, T, S: ?Sized, K> FixedCapacityVec<'a, T, S, K> {
     /// Returns the active logical element count.
     pub fn len(&self) -> usize {
         self.len
@@ -135,21 +81,18 @@ impl<'a, T, S: ?Sized, K> FixedCapacityVec<'a, T, S, K> {
     }
 }
 
-impl<'a, T, S> FixedCapacityVec<'a, T, S, FixedValueElement>
+impl<'a, T> FixedCapacityVec<'a, T, FixedValueElement>
 where
     T: Pod,
-    S: LayoutStorageMut + ?Sized,
 {
     /// Returns the active element at `index`.
-    pub fn get(&self, index: usize) -> Result<Option<T>, ProgramError> {
+    pub fn get(&self, index: usize) -> Option<T> {
         if index >= self.len {
-            return Ok(None);
+            return None;
         }
-
-        let bytes = self.storage.borrow_data()?;
         let start = self.data_start() + index * self.elem_size;
         let end = start + self.elem_size;
-        Ok(Some(bytemuck::pod_read_unaligned(&bytes[start..end])))
+        Some(bytemuck::pod_read_unaligned(&self.bytes[start..end]))
     }
 
     /// Appends one element without resizing the backing storage.
@@ -163,7 +106,7 @@ where
         }
 
         let index = self.len;
-        self.write_bytes_at(index, bytemuck::bytes_of(&value))?;
+        self.write_bytes_at(index, bytemuck::bytes_of(&value));
         self.write_len(next_len)?;
         self.len = next_len;
         Ok(())
@@ -176,7 +119,7 @@ where
         }
 
         let index = self.len - 1;
-        let value = self.get(index)?.expect("validated Vec length");
+        let value = self.get(index).expect("validated Vec length");
         self.write_len(index)?;
         self.len = index;
         Ok(Some(value))
@@ -188,14 +131,14 @@ where
             return Err(DataLayoutError::InvalidDataLength.into());
         }
 
-        self.write_bytes_at(index, bytemuck::bytes_of(&value))
+        self.write_bytes_at(index, bytemuck::bytes_of(&value));
+        Ok(())
     }
 }
 
-impl<'a, T, S> FixedCapacityVec<'a, T, S, FixedLayoutElement>
+impl<'a, T> FixedCapacityVec<'a, T, FixedLayoutElement>
 where
     T: Encodable + FixedSizeLayout,
-    S: LayoutStorageMut + ?Sized,
 {
     /// Appends one fixed-size layout element without resizing backing storage.
     pub fn push(&mut self, value: &T) -> Result<(), ProgramError> {
@@ -236,10 +179,7 @@ where
     }
 }
 
-impl<'a, T, S, K> FixedCapacityVec<'a, T, S, K>
-where
-    S: LayoutStorageMut + ?Sized,
-{
+impl<'a, T, K> FixedCapacityVec<'a, T, K> {
     /// Shrinks the active logical length.
     pub fn truncate(&mut self, len: usize) -> Result<(), ProgramError> {
         if len > self.len {
@@ -259,53 +199,32 @@ where
         self.truncate(0)
     }
 
-    fn write_len(&self, len: usize) -> Result<(), ProgramError> {
+    fn write_len(&mut self, len: usize) -> Result<(), ProgramError> {
         if len > self.capacity || len > max_len(self.len_width) {
             return Err(DataLayoutError::LengthExceedsCapacity.into());
         }
 
-        let mut bytes = self.storage.borrow_data_mut()?;
-        write_len_header(&mut bytes, self.offset, self.len_width, len)
+        write_len_header(self.bytes, self.offset, self.len_width, len)
     }
 
-    fn write_bytes_at(&self, index: usize, value: &[u8]) -> Result<(), ProgramError> {
+    fn write_bytes_at(&mut self, index: usize, value: &[u8]) {
         let start = self.data_start() + index * self.elem_size;
         let end = start + self.elem_size;
-        let mut bytes = self.storage.borrow_data_mut()?;
-        bytes[start..end].copy_from_slice(value);
-        Ok(())
+        self.bytes[start..end].copy_from_slice(value);
     }
 
-    fn write_encoded_at(&self, index: usize, value: &T) -> Result<(), ProgramError>
+    fn write_encoded_at(&mut self, index: usize, value: &T) -> Result<(), ProgramError>
     where
         T: Encodable,
     {
         let start = self.data_start() + index * self.elem_size;
         let end = start + self.elem_size;
-        let mut bytes = self.storage.borrow_data_mut()?;
-        let remaining = value.encode_to(&mut bytes[start..end])?;
+        let remaining = value.encode_to(&mut self.bytes[start..end])?;
         if !remaining.is_empty() {
             return Err(DataLayoutError::InvalidDataLength.into());
         }
         Ok(())
     }
-}
-
-fn validate_storage_len(
-    storage_len: usize,
-    offset: usize,
-    len_width: usize,
-    elem_size: usize,
-    capacity: usize,
-) -> Result<(), ProgramError> {
-    let expected_len = offset
-        .checked_add(len_width)
-        .and_then(|len| len.checked_add(capacity.checked_mul(elem_size)?))
-        .ok_or(DataLayoutError::LengthExceedsCapacity)?;
-    if storage_len < expected_len {
-        return Err(DataLayoutError::InvalidDataLength.into());
-    }
-    Ok(())
 }
 
 fn read_len_header(bytes: &[u8], offset: usize, len_width: usize) -> Result<usize, ProgramError> {
