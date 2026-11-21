@@ -6,7 +6,14 @@ use pinocchio::error::ProgramError;
 use super::{Encodable, FixedSizeLayout, LayoutBounds, LayoutWriteGuard};
 use crate::DataLayoutError;
 
-/// Mutable byte-copy slot for a fixed-value field with no alignment guarantee.
+/// Mutable slot for an integer or fixed-size integer array accessed by byte copy.
+///
+/// - `field: u64`
+/// - `field: [u16; 2]`
+///
+/// The macro returns this helper when it cannot guarantee alignment for a
+/// mutable reference. For the integer field, `view.field_mut().set(42)`
+/// writes the encoded value.
 pub struct LayoutCopyMut<'a, T> {
     bytes: &'a mut [u8],
     _marker: PhantomData<T>,
@@ -30,7 +37,12 @@ impl<'a, T: Pod> LayoutCopyMut<'a, T> {
     }
 }
 
-/// Mutable slot for a layout-encoded `bool`.
+/// Mutable slot for a boolean encoded as one byte.
+///
+/// - `field: bool`
+///
+/// `view.field_mut().set(true)` writes the encoded byte. Optional booleans
+/// use [`LayoutBoolOptionMut`].
 pub struct LayoutBoolMut<'a>(&'a mut u8);
 
 impl<'a> LayoutBoolMut<'a> {
@@ -48,7 +60,20 @@ impl<'a> LayoutBoolMut<'a> {
     }
 }
 
-/// A trailing option borrows the guard so it can resize its payload.
+/// Resizable backing store used by [`LayoutOptionMut`], [`LayoutBoolOptionMut`],
+/// and [`FlexibleLayoutOptionMut`].
+///
+/// - `#[flexible] field: Option<Pubkey>`
+/// - `#[flexible] field: Option<u64>`
+/// - `#[flexible] field: Option<[u8; 32]>`
+/// - `#[flexible] field: Option<bool>`
+/// - `#[flexible] field: Option<AccountConfig>`
+///
+/// For `Some`, `LayoutOptionMut` requests space for the tag and the bytes of
+/// a key, integer, or array. `LayoutBoolOptionMut` delegates to it with a `u8`
+/// payload. `FlexibleLayoutOptionMut` uses the nested layout's encoded length
+/// to size the slot before encoding the value. All three clear the trailing
+/// field by resizing storage back to its offset.
 pub struct FlexibleOptionBytes<'a, G> {
     borrowed: &'a mut G,
     offset: usize,
@@ -80,7 +105,17 @@ impl<G: LayoutWriteGuard> AsRef<[u8]> for FlexibleOptionBytes<'_, G> {
     }
 }
 
-/// Mutable slot for a layout-encoded `Option<T>`.
+/// Mutable slot for `Option<T>` where `T` is a supported integer, a fixed-size
+/// integer array, or a `Pubkey`/`Address`.
+///
+/// - `field: Option<u64>`
+/// - `field: Option<[u8; 32]>`
+/// - `field: Option<Address>`
+/// - `#[flexible] field: Option<Pubkey>`
+///
+/// For a fixed field, `B` is `&mut [u8]` and `view.field_mut().set(None)`
+/// clears the tag in place. For a trailing `#[flexible]` field, `B` is
+/// [`FlexibleOptionBytes`] and `view.field_mut().set(None)?` can shrink storage.
 pub struct LayoutOptionMut<B, T> {
     slot: B,
     _marker: PhantomData<T>,
@@ -122,7 +157,14 @@ impl<G: LayoutWriteGuard, T: Pod> LayoutOptionMut<FlexibleOptionBytes<'_, G>, T>
     }
 }
 
-/// Mutable option slot whose payload is a boolean encoded as one byte.
+/// Mutable slot for an `Option<bool>` field, with one byte for the boolean payload.
+///
+/// - `field: Option<bool>`
+/// - `#[flexible] field: Option<bool>`
+///
+/// `view.field_mut().set(Some(false))` updates a fixed slot in place.
+/// The flexible form uses [`FlexibleOptionBytes`] and returns a `Result`
+/// because setting the value can grow the trailing field.
 pub struct LayoutBoolOptionMut<B>(LayoutOptionMut<B, u8>);
 
 impl<B: AsRef<[u8]>> LayoutBoolOptionMut<B> {
@@ -148,7 +190,13 @@ impl<G: LayoutWriteGuard> LayoutBoolOptionMut<FlexibleOptionBytes<'_, G>> {
     }
 }
 
-/// Mutable slot for an option containing a fixed-size nested layout.
+/// Mutable slot for a final `Option<T>` field where `T` is a user-defined
+/// [`FixedSizeLayout`].
+///
+/// - `field: Option<AccountConfig>`
+///
+/// `view.field_mut().set(Some(&config))?` encodes the nested fields in the
+/// reserved slot. Clearing it retains the slot.
 pub struct FixedLayoutOptionMut<'a, T> {
     slot: &'a mut [u8],
     _marker: PhantomData<T>,
@@ -168,7 +216,15 @@ impl<'a, T: FixedSizeLayout> FixedLayoutOptionMut<'a, T> {
     }
 }
 
-/// Mutable slot for a final flexible option containing a nested layout.
+/// Mutable slot for a final `#[flexible] Option<T>` containing a user-defined
+/// layout whose encoded size has known [bounds](LayoutBounds).
+///
+/// - `#[flexible] field: Option<AccountConfig>`
+/// - `#[flexible] field: Option<BytePayload>`
+///
+/// The nested layout can have a fixed size (`AccountConfig`) or contain a
+/// trailing vector (`BytePayload`). `view.field_mut().set(Some(&config))?`
+/// resizes the field to fit the encoded value.
 pub struct FlexibleLayoutOptionMut<'a, G, T> {
     slot: FlexibleOptionBytes<'a, G>,
     _marker: PhantomData<T>,
