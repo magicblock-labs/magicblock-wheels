@@ -93,30 +93,6 @@ fn max_len_storage_shrinks_exactly() {
     assert_eq!(storage.bytes(), vec![0; 16]);
 }
 
-#[fixed_offset_layout(buffer_offset = 1)]
-struct FixedOffsetOneCopyArgs {
-    amount: u64,
-    counter: u32,
-}
-
-#[test]
-fn fixed_offset_layout_validates_buffer_offset() {
-    assert_eq!(FixedOffsetOneCopyArgs::DATA_LEN, 12);
-
-    let mut aligned = Aligned([0; FixedOffsetOneCopyArgs::DATA_LEN + 1]);
-    let bytes = &mut aligned.0;
-    bytes[1..9].copy_from_slice(&55_u64.to_le_bytes());
-    bytes[9..13].copy_from_slice(&7_u32.to_le_bytes());
-
-    let view = FixedOffsetOneCopyArgs::decode(&bytes[1..]).unwrap();
-    assert_eq!(view.amount(), 55);
-    assert_eq!(view.counter(), 7);
-    assert_eq!(
-        FixedOffsetOneCopyArgs::decode(&bytes[..FixedOffsetOneCopyArgs::DATA_LEN]).unwrap_err(),
-        DataLayoutError::InvalidBufferOffset
-    );
-}
-
 #[derive(Clone)]
 #[fixed_offset_layout(buffer_offset = unknown)]
 struct AccountConfig {
@@ -796,37 +772,46 @@ fn fixed_offset_layout_mutates_trailing_extendable_vec_storage() {
     assert_eq!(view.tail().capacity(), 2);
 }
 
-#[fixed_offset_layout(buffer_offset = 0)]
+#[fixed_offset_layout(buffer_offset = 1)]
 struct FixedTrailingWideVecArgs {
     tag: u8,
     #[extendable = 8]
-    payload: Vec<u8>,
+    payload: Vec<u16>,
 }
 
 #[test]
-fn fixed_offset_layout_supports_eight_byte_trailing_extendable_vec_len_width() {
-    const PAYLOAD_LEN: usize = 0x1_0000;
+fn wide_length_header_round_trips_an_aligned_u16_slice() {
+    const COUNT: usize = 0x1_0000;
+    const FRAME_LEN: usize = 1 + 8 + COUNT * 2;
 
     assert_eq!(FixedTrailingWideVecArgs::MIN_DATA_LEN, 1);
     assert_eq!(
         FixedTrailingWideVecArgs::MAX_DATA_LEN,
-        1 + 8 + u32::MAX as usize
+        1 + 8 + u32::MAX as usize * 2
     );
     assert_eq!(FixedTrailingWideVecArgs::OFFSETS, [0, 1]);
 
-    let payload = (0..PAYLOAD_LEN).map(|value| value as u8).collect();
-    let value = FixedTrailingWideVecArgs { tag: 7, payload };
-    let encoded = value.encode().unwrap();
-
-    assert_eq!(encoded.len(), 1 + 8 + PAYLOAD_LEN);
-    assert_eq!(encoded[0], 7);
-    assert_eq!(&encoded[1..9], &(PAYLOAD_LEN as u64).to_le_bytes()[..]);
-
-    let view = FixedTrailingWideVecArgs::decode(&encoded).unwrap();
+    let value = FixedTrailingWideVecArgs {
+        tag: 7,
+        payload: (0..=u16::MAX).collect(),
+    };
+    let mut aligned = Aligned([0; 1 + FRAME_LEN]);
+    // Starting the frame at byte 1 puts the u16 payload at byte 10.
+    let frame = &mut aligned.0[1..];
+    assert!(value.encode_to(frame).unwrap().is_empty());
+    assert_eq!(frame[0], 7);
+    assert_eq!(&frame[1..9], &(COUNT as u64).to_le_bytes());
+    let view = FixedTrailingWideVecArgs::decode(frame).unwrap();
     assert_eq!(view.tag(), 7);
-    assert_eq!(view.payload().len(), PAYLOAD_LEN);
-    assert_eq!(view.payload().capacity(), PAYLOAD_LEN);
-    assert_eq!(view.payload().active_bytes(), &value.payload[..]);
+    assert_eq!(view.payload().len(), COUNT);
+    assert_eq!(view.payload().capacity(), COUNT);
+    assert_eq!(view.payload().as_slice(), value.payload.as_slice());
+
+    aligned.0.copy_within(1.., 0);
+    assert_eq!(
+        FixedTrailingWideVecArgs::decode(&aligned.0[..FRAME_LEN]).unwrap_err(),
+        DataLayoutError::InvalidBufferOffset
+    );
 }
 
 #[fixed_offset_layout(buffer_offset = 0)]
