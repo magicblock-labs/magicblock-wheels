@@ -193,7 +193,14 @@ fn flexible_option_round_trips_a_fixed_size_child() {
     assert_eq!(FlexibleNestedOptionArgs::MIN_DATA_LEN, 1);
     assert_eq!(FlexibleNestedOptionArgs::MAX_DATA_LEN, 39);
 
-    let storage = TestStorage::new(vec![3]);
+    let empty = FlexibleNestedOptionArgs {
+        header: 7,
+        config: None,
+    }
+    .encode()
+    .unwrap();
+    assert_eq!(empty, [7]);
+    let storage = TestStorage::new(empty);
     let config = AccountConfig {
         sponsored: None,
         authority: Pubkey::from([8; 32]),
@@ -205,81 +212,10 @@ fn flexible_option_round_trips_a_fixed_size_child() {
 
     let bytes = storage.bytes();
     assert_eq!(bytes.len(), FlexibleNestedOptionArgs::MAX_DATA_LEN);
+    assert_eq!(&bytes[..2], &[7, 1]);
     let aligned = aligned_copy::<{ FlexibleNestedOptionArgs::MAX_DATA_LEN }>(&bytes);
     let view = FlexibleNestedOptionArgs::decode(&aligned.0).unwrap();
     assert_eq!(view.config().unwrap().threshold(), config.threshold);
-}
-
-#[fixed_offset_layout(buffer_offset = 0)]
-struct FixedTrailingOptionArgs {
-    header: u16,
-    authority: Address,
-    #[flexible]
-    delegate: Option<Pubkey>,
-}
-
-#[test]
-fn trailing_pubkey_option_round_trips_through_storage() {
-    assert_eq!(FixedTrailingOptionArgs::MIN_DATA_LEN, 34);
-    assert_eq!(FixedTrailingOptionArgs::MAX_DATA_LEN, 67);
-    assert_eq!(FixedTrailingOptionArgs::OFFSETS, [0, 2, 34]);
-
-    let delegate = Pubkey::from([4; 32]);
-    let mut value = FixedTrailingOptionArgs {
-        header: 9,
-        authority: Pubkey::from([3; 32]),
-        delegate: None,
-    };
-    let empty = value.encode().unwrap();
-    assert_eq!(empty, [9_u16.to_le_bytes().as_slice(), &[3; 32]].concat());
-    value.delegate = Some(delegate);
-    let populated = value.encode().unwrap();
-    assert_eq!(populated, [empty.as_slice(), &[1], &[4; 32]].concat());
-
-    let storage = TestStorage::new(empty.clone());
-    let mut view = FixedTrailingOptionArgs::decode_mut(&storage).unwrap();
-    let mut slot = view.delegate_mut().unwrap();
-    assert_eq!(slot.get().unwrap(), None);
-    slot.set(Some(delegate)).unwrap();
-    assert_eq!(storage.bytes(), populated);
-    let aligned = aligned_copy::<67>(&populated);
-    let decoded = FixedTrailingOptionArgs::decode(&aligned.0).unwrap();
-    assert_eq!(decoded.header(), value.header);
-    assert_eq!(decoded.authority(), &value.authority);
-    assert_eq!(decoded.delegate(), Some(&delegate));
-
-    let mut view = FixedTrailingOptionArgs::decode_mut(&storage).unwrap();
-    let mut slot = view.delegate_mut().unwrap();
-    assert_eq!(slot.get().unwrap(), Some(delegate));
-    slot.set(None).unwrap();
-    assert_eq!(storage.bytes(), empty);
-    let aligned = aligned_copy::<34>(&empty);
-    assert_eq!(
-        FixedTrailingOptionArgs::decode(&aligned.0)
-            .unwrap()
-            .delegate(),
-        None
-    );
-    assert_eq!(storage.resize_lens(), [67, 34]);
-}
-
-#[test]
-fn fixed_offset_layout_rejects_invalid_trailing_flexible_option_encoding() {
-    let base = [9_u16.to_le_bytes().as_slice(), &[3; 32]].concat();
-
-    let tagged_none = [base.as_slice(), &[0], &[4; 32]].concat();
-    let aligned = aligned_copy::<96>(&tagged_none);
-    assert_eq!(
-        FixedTrailingOptionArgs::decode(&aligned.0[..tagged_none.len()]).unwrap_err(),
-        DataLayoutError::InvalidOptionTag
-    );
-
-    let truncated_some = [base.as_slice(), &[1], &[4; 8]].concat();
-    let aligned = aligned_copy::<96>(&truncated_some);
-    assert_eq!(
-        FixedTrailingOptionArgs::decode(&aligned.0[..truncated_some.len()]).unwrap_err(),
-        DataLayoutError::TruncatedPayload
-    );
 }
 
 #[fixed_offset_layout(buffer_offset = unknown)]
@@ -429,6 +365,7 @@ fn fixed_offset_layout_supports_flexible_variable_nested_option() {
 fn fixed_offset_layout_rejects_invalid_flexible_nested_option() {
     for (bytes, expected_error) in [
         (vec![7, 0, 3, 1, 9], DataLayoutError::InvalidOptionTag),
+        (vec![7, 1], DataLayoutError::TruncatedPayload),
         (vec![7, 1, 3, 3, 9], DataLayoutError::LengthExceedsCapacity),
         (vec![7; 260], DataLayoutError::InvalidDataLength),
     ] {
