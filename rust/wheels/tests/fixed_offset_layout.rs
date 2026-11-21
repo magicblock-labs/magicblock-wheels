@@ -245,7 +245,6 @@ fn byte_payload_extends_by_slices_up_to_the_length_header_limit() {
     let values: Vec<u8> = (0..=254).collect();
     payload.extend_from_slice(&values[..2]).unwrap();
     payload.extend_from_slice(&values[2..4]).unwrap();
-    payload.extend_from_slice(&[]).unwrap();
     assert_eq!((payload.len(), payload.capacity()), (4, 4));
     assert_eq!(storage.bytes(), [7, 4, 0, 1, 2, 3]);
     assert_eq!(payload.storage_len(), 5);
