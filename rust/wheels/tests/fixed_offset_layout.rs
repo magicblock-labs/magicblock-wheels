@@ -76,7 +76,7 @@ impl LayoutStorageMut for TestStorage {
 
     fn borrow_data_mut(&self) -> Result<Self::RefMut<'_>, ProgramError> {
         Ok(TestWriteGuard {
-            bytes: self
+            borrowed: self
                 .bytes
                 .try_borrow_mut()
                 .map_err(|_| ProgramError::AccountBorrowFailed)?,
@@ -86,27 +86,27 @@ impl LayoutStorageMut for TestStorage {
 }
 
 struct TestWriteGuard<'a> {
-    bytes: RefMut<'a, Vec<u8>>,
+    borrowed: RefMut<'a, Vec<u8>>,
     resize_lens: &'a RefCell<Vec<usize>>,
 }
 
 impl Deref for TestWriteGuard<'_> {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        &self.bytes
+        &self.borrowed
     }
 }
 
 impl DerefMut for TestWriteGuard<'_> {
     fn deref_mut(&mut self) -> &mut [u8] {
-        &mut self.bytes
+        &mut self.borrowed
     }
 }
 
 impl LayoutWriteGuard for TestWriteGuard<'_> {
     fn resize(&mut self, new_len: usize) -> Result<(), ProgramError> {
         self.resize_lens.borrow_mut().push(new_len);
-        self.bytes.resize(new_len, 0);
+        self.borrowed.resize(new_len, 0);
         Ok(())
     }
 }

@@ -50,14 +50,14 @@ impl<'a> LayoutBoolMut<'a> {
 
 /// A trailing option borrows the guard so it can resize its payload.
 pub struct FlexibleOptionBytes<'a, G> {
-    bytes: &'a mut G,
+    borrowed: &'a mut G,
     offset: usize,
 }
 
 impl<'a, G: LayoutWriteGuard> FlexibleOptionBytes<'a, G> {
     #[doc(hidden)]
-    pub fn new(bytes: &'a mut G, offset: usize) -> Self {
-        Self { bytes, offset }
+    pub fn new(borrowed: &'a mut G, offset: usize) -> Self {
+        Self { borrowed, offset }
     }
 
     fn resize(&mut self, payload_len: Option<usize>) -> Result<&mut [u8], ProgramError> {
@@ -69,14 +69,14 @@ impl<'a, G: LayoutWriteGuard> FlexibleOptionBytes<'a, G> {
                 .ok_or(DataLayoutError::InvalidDataLength)?,
             None => self.offset,
         };
-        self.bytes.resize(len)?;
-        Ok(&mut self.bytes[self.offset..])
+        self.borrowed.resize(len)?;
+        Ok(&mut self.borrowed[self.offset..])
     }
 }
 
 impl<G: LayoutWriteGuard> AsRef<[u8]> for FlexibleOptionBytes<'_, G> {
     fn as_ref(&self) -> &[u8] {
-        &self.bytes[self.offset..]
+        &self.borrowed[self.offset..]
     }
 }
 

@@ -310,11 +310,11 @@ pub(crate) fn expand_fixed_offset_layout(
         where
             S: ::wheels::layout::LayoutStorageMut + ?Sized,
         {
-            let bytes = storage.borrow_data_mut()?;
-            Self::__validate_bytes(&bytes)
+            let borrowed = storage.borrow_data_mut()?;
+            Self::__validate_bytes(&borrowed)
                 .map_err(::pinocchio::error::ProgramError::from)?;
 
-            Ok(#view_mut_name { bytes })
+            Ok(#view_mut_name { borrowed })
         }
     };
     let view_mut_bounds = where_bounds.iter();
@@ -324,12 +324,12 @@ pub(crate) fn expand_fixed_offset_layout(
         where
             S: ::wheels::layout::LayoutStorageMut + ?Sized + 'a,
         {
-            bytes: S::RefMut<'a>,
+            borrowed: S::RefMut<'a>,
         }
 
         impl<'a, S: ::wheels::layout::LayoutStorageMut + ?Sized> core::fmt::Debug for #view_mut_name<'a, S> {
             fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                f.debug_struct(stringify!(#view_mut_name)).field("storage_len", &self.bytes.len()).finish()
+                f.debug_struct(stringify!(#view_mut_name)).field("storage_len", &self.borrowed.len()).finish()
             }
         }
 
@@ -340,11 +340,11 @@ pub(crate) fn expand_fixed_offset_layout(
         {
             /// Reads the backing bytes through the borrow held by this view.
             pub fn bytes(&self) -> &[u8] {
-                &self.bytes
+                &self.borrowed
             }
 
             pub fn storage_len(&self) -> usize {
-                self.bytes.len()
+                self.borrowed.len()
             }
 
             #(#view_mut_methods)*
@@ -1429,7 +1429,7 @@ impl FixedFieldKind {
 
         let guard = quote!(S::RefMut<'a>);
         let flexible_slot =
-            quote!(::wheels::layout::FlexibleOptionBytes::new(&mut self.bytes, #offset));
+            quote!(::wheels::layout::FlexibleOptionBytes::new(&mut self.borrowed, #offset));
         let (handle, field) = match self {
             Self::Value {
                 value,
@@ -1437,11 +1437,11 @@ impl FixedFieldKind {
             } => {
                 let ty = value.ty();
                 let size = usize_lit(value.size());
-                let slot = quote!(&mut self.bytes[#offset..#offset + #size]);
+                let slot = quote!(&mut self.borrowed[#offset..#offset + #size]);
                 if matches!(value, FixedValueKind::Bool { .. }) {
                     (
                         quote!(::wheels::layout::LayoutBoolMut<'_>),
-                        quote!(::wheels::layout::LayoutBoolMut::new(&mut self.bytes[#offset])),
+                        quote!(::wheels::layout::LayoutBoolMut::new(&mut self.borrowed[#offset])),
                     )
                 } else if can_mut_borrow_value(value, offset_value, buffer_offset) {
                     (quote!(&mut #ty), quote!(::bytemuck::from_bytes_mut(#slot)))
@@ -1461,7 +1461,7 @@ impl FixedFieldKind {
                         let size = usize_lit(1 + value.size());
                         (
                             quote!(&mut [u8]),
-                            quote!(&mut self.bytes[#offset..#offset + #size]),
+                            quote!(&mut self.borrowed[#offset..#offset + #size]),
                         )
                     }
                     Optional::Flexible => (
@@ -1489,7 +1489,7 @@ impl FixedFieldKind {
                 let size = quote!(1 + <#ty as ::wheels::layout::FixedSizeLayout>::DATA_LEN);
                 (
                     quote!(::wheels::layout::FixedLayoutOptionMut<'_, #ty>),
-                    quote!(::wheels::layout::FixedLayoutOptionMut::new(&mut self.bytes[#offset..#offset + #size])),
+                    quote!(::wheels::layout::FixedLayoutOptionMut::new(&mut self.borrowed[#offset..#offset + #size])),
                 )
             }
             Self::NestedLayoutOption {
@@ -1509,12 +1509,12 @@ impl FixedFieldKind {
                         let max = capacity.max_capacity_lit();
                         (
                             quote!(::wheels::layout::FixedCapacityVec<'_, #elem_ty, #marker>),
-                            quote!(::wheels::layout::FixedCapacityVec::new(&mut self.bytes, #offset, #len_width, #elem_size, #max)),
+                            quote!(::wheels::layout::FixedCapacityVec::new(&mut self.borrowed, #offset, #len_width, #elem_size, #max)),
                         )
                     }
                     Capacity::Extendable { .. } => (
                         quote!(::wheels::layout::ExtendableVec<'_, #elem_ty, #guard, #marker>),
-                        quote!(::wheels::layout::ExtendableVec::new_storage(&mut self.bytes, #offset, #len_width, #elem_size)),
+                        quote!(::wheels::layout::ExtendableVec::new_storage(&mut self.borrowed, #offset, #len_width, #elem_size)),
                     ),
                 }
             }
