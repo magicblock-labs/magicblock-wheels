@@ -246,7 +246,7 @@ fn flexible_pubkey_round_trips_after_set_and_clear() {
 fn flexible_pubkey_rejects_invalid_tag_and_truncated_key() {
     let mut bytes = [7; FlexiblePubkeyArgs::MAX_DATA_LEN];
     for (tag, key_bytes, expected) in [
-        (0, 32, DataLayoutError::InvalidOptionTag),
+        (2, 32, DataLayoutError::InvalidOptionTag),
         (1, 8, DataLayoutError::TruncatedPayload),
     ] {
         bytes[1] = tag;
