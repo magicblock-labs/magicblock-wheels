@@ -13,7 +13,7 @@ use wheels::{
         Decodable, Encodable, LayoutStorage, LayoutStorageMut, LayoutWriteGuard, MaxLenStorage,
         PrefixDecodable,
     },
-    variable_offset_layout, DataLayoutError, Pubkey,
+    DataLayoutError, Pubkey,
 };
 
 #[repr(align(8))]
@@ -112,7 +112,7 @@ impl LayoutWriteGuard for TestWriteGuard<'_> {
 }
 
 #[test]
-fn max_len_storage_shrinks_exactly() {
+fn max_len_storage_shrinks_exactly_and_grows_in_steps() {
     let storage = TestStorage::new(vec![0; 9]);
     let max_len_storage = MaxLenStorage::new(&storage, 16, 4);
 
@@ -121,9 +121,15 @@ fn max_len_storage_shrinks_exactly() {
     assert_eq!(storage.resize_lens(), vec![3]);
     assert_eq!(storage.bytes(), vec![0; 3]);
 
-    max_len_storage.resize(16).unwrap();
+    max_len_storage.resize(4).unwrap();
+    assert_eq!(storage.data_len(), 7);
 
-    assert_eq!(storage.resize_lens(), vec![3, 16]);
+    max_len_storage.resize(16).unwrap();
+    assert_eq!(
+        max_len_storage.resize(17).unwrap_err(),
+        ProgramError::from(DataLayoutError::LengthExceedsCapacity)
+    );
+    assert_eq!(storage.resize_lens(), vec![3, 7, 16]);
     assert_eq!(storage.bytes(), vec![0; 16]);
 }
 
@@ -268,7 +274,7 @@ struct FlexibleNestedOptionArgs {
 
 #[test]
 fn flexible_option_round_trips_a_fixed_size_child() {
-    assert_eq!(FlexibleNestedOptionArgs::MIN_DATA_LEN, 1);
+    assert_eq!(FlexibleNestedOptionArgs::MIN_DATA_LEN, 2);
     assert_eq!(FlexibleNestedOptionArgs::MAX_DATA_LEN, 39);
 
     let empty = FlexibleNestedOptionArgs {
@@ -277,7 +283,7 @@ fn flexible_option_round_trips_a_fixed_size_child() {
     }
     .encode()
     .unwrap();
-    assert_eq!(empty, [7]);
+    assert_eq!(empty, [7, 0]);
     let storage = TestStorage::new(empty);
     let config = AccountConfig {
         sponsored: None,
@@ -306,10 +312,10 @@ struct FlexiblePubkeyArgs {
 
 #[test]
 fn flexible_pubkey_round_trips_after_set_and_clear() {
-    assert_eq!(FlexiblePubkeyArgs::MIN_DATA_LEN, 1);
+    assert_eq!(FlexiblePubkeyArgs::MIN_DATA_LEN, 2);
     assert_eq!(FlexiblePubkeyArgs::MAX_DATA_LEN, 34);
 
-    let storage = TestStorage::new(vec![7]);
+    let storage = TestStorage::new(vec![7, 0]);
     let capped = MaxLenStorage::new(&storage, 64, 64);
     let mut view = FlexiblePubkeyArgs::decode_mut(&capped).unwrap();
     for key in [Some(Pubkey::from([4; 32])), None] {
@@ -320,11 +326,36 @@ fn flexible_pubkey_round_trips_after_set_and_clear() {
         let decoded = FlexiblePubkeyArgs::decode(view.bytes()).unwrap();
         assert_eq!(decoded.header(), 7);
         assert_eq!(decoded.key(), key.as_ref());
+
+        let record = FlexiblePubkeyArgs { header: 7, key };
+        let next = BytePayload {
+            version: 9,
+            payload: vec![42],
+        };
+        let mut bytes = vec![0xff; record.encoded_len().unwrap() + next.encoded_len().unwrap()];
+        let rest = record.encode_to(&mut bytes).unwrap();
+        assert!(next.encode_to(rest).unwrap().is_empty());
+        let (first, rest) = FlexiblePubkeyArgs::decode_prefix(&bytes).unwrap();
+        assert_eq!(first.bytes(), view.bytes());
+        assert_eq!(first.key(), key.as_ref());
+        assert_eq!(rest, &[9, 1, 42]);
+        assert_eq!(
+            BytePayload::decode(rest).unwrap().payload().as_slice(),
+            &[42]
+        );
     }
 }
 
 #[test]
 fn flexible_pubkey_rejects_invalid_tag_and_truncated_key() {
+    assert_eq!(
+        FlexiblePubkeyArgs::decode(&[7]).unwrap_err(),
+        DataLayoutError::InvalidDataLength
+    );
+    let stale = [0; 34];
+    let (empty, rest) = FlexiblePubkeyArgs::decode_prefix(&stale).unwrap();
+    assert_eq!(empty.key(), None);
+    assert_eq!(rest.len(), 32);
     let mut bytes = [7; FlexiblePubkeyArgs::MAX_DATA_LEN];
     for (tag, key_bytes, expected) in [
         (2, 32, DataLayoutError::InvalidOptionTag),
@@ -353,16 +384,14 @@ struct BytePayload {
 
 #[test]
 fn byte_payload_extends_by_slices_up_to_the_length_header_limit() {
-    assert_eq!(BytePayload::MIN_DATA_LEN, 1);
+    assert_eq!(BytePayload::MIN_DATA_LEN, 2);
     assert_eq!(BytePayload::MAX_DATA_LEN, 257);
-    for empty in [[7].as_slice(), &[7, 0]] {
-        assert!(BytePayload::decode(empty)
-            .unwrap()
-            .payload()
-            .as_slice()
-            .is_empty());
-    }
-    let storage = TestStorage::new(vec![7]);
+    assert_eq!(
+        BytePayload::decode(&[7]).unwrap_err(),
+        DataLayoutError::MissingLengthHeader
+    );
+    assert!(BytePayload::decode(&[7, 0]).unwrap().payload().is_empty());
+    let storage = TestStorage::new(vec![7, 0]);
     let mut view = BytePayload::decode_mut(&storage).unwrap();
     let mut payload = view.payload_mut();
 
@@ -393,7 +422,7 @@ fn byte_payload_extends_by_slices_up_to_the_length_header_limit() {
 
 #[test]
 fn max_len_storage_grows_extendable_vec_in_steps_up_to_its_limit() {
-    let storage = TestStorage::new(vec![7]);
+    let storage = TestStorage::new(vec![7, 0]);
     let max_len_storage = MaxLenStorage::new(&storage, 9, 4);
     let mut view = BytePayload::decode_mut(&max_len_storage).unwrap();
     let mut payload = view.payload_mut();
@@ -404,37 +433,64 @@ fn max_len_storage_grows_extendable_vec_in_steps_up_to_its_limit() {
     );
     assert_eq!((payload.len(), payload.capacity()), (0, 0));
     assert!(storage.resize_lens().is_empty());
-    assert_eq!(view.bytes(), [7]);
+    assert_eq!(view.bytes(), [7, 0]);
 
     let mut payload = view.payload_mut();
     payload.extend_from_slice(&[1, 2]).unwrap();
-    assert_eq!(payload.capacity(), 3);
-    assert_eq!(view.bytes(), [7, 2, 1, 2, 0]);
+    assert_eq!(payload.capacity(), 4);
+    assert_eq!(view.bytes(), [7, 2, 1, 2, 0, 0]);
     let mut payload = view.payload_mut();
     payload.push(3).unwrap();
-    assert_eq!(storage.resize_lens(), [5]);
+    assert_eq!(storage.resize_lens(), [6]);
     payload.push(4).unwrap();
+    payload.push(5).unwrap();
     assert_eq!(payload.storage_len(), 8);
-    assert_eq!(storage.resize_lens(), [5, 9]);
+    assert_eq!(storage.resize_lens(), [6, 9]);
     drop(view);
 
     let bytes = storage.bytes();
-    assert_eq!(bytes, [7, 4, 1, 2, 3, 4, 0, 0, 0]);
+    assert_eq!(bytes, [7, 5, 1, 2, 3, 4, 5, 0, 0]);
     let view = BytePayload::decode(&bytes).unwrap();
-    assert_eq!(view.payload().as_slice(), &[1, 2, 3, 4]);
+    assert_eq!(view.payload().as_slice(), &[1, 2, 3, 4, 5]);
     assert_eq!(view.payload().capacity(), 7);
+
+    // The empty record is 2 bytes. A 256-byte growth step would take it to
+    // 258 bytes, one past the maximum for its one-byte count.
+    let empty = BytePayload {
+        version: 7,
+        payload: vec![],
+    }
+    .encode()
+    .unwrap();
+    let storage = TestStorage::new(empty);
+    let capped = MaxLenStorage::new(&storage, 512, 256);
+    BytePayload::decode_mut(&capped)
+        .unwrap()
+        .payload_mut()
+        .push(42)
+        .unwrap();
+
+    let bytes = storage.bytes();
+    assert_eq!(bytes.len(), BytePayload::MAX_DATA_LEN);
+    let decoded =
+        BytePayload::decode(&bytes).expect("a successful push must leave a readable record");
+    assert_eq!(decoded.payload().as_slice(), &[42]);
+    assert_eq!(decoded.payload().capacity(), u8::MAX as usize);
+    let mut reopened =
+        BytePayload::decode_mut(&capped).expect("the record must also reopen for mutation");
+    assert_eq!(reopened.payload_mut().len(), 1);
 }
 
 #[test]
 fn cap_only_wrapper_preserves_inner_growth_step() {
-    let storage = TestStorage::new(vec![7]);
+    let storage = TestStorage::new(vec![7, 0]);
 
     // One `MaxLenStorage` is enough to set both the 64-byte cap and the 16-byte
     // growth step.
     //
     // This test adds a second wrapper with the same cap and a zero step to
     // verify that it preserves the inner step. The first push grows the buffer
-    // from 1 to 17 bytes, and the second reuses that space.
+    // from 2 to 18 bytes, and the second reuses that space.
     let inner = MaxLenStorage::new(&storage, 64, 16);
     let outer = MaxLenStorage::new(&inner, 64, 0);
 
@@ -443,33 +499,25 @@ fn cap_only_wrapper_preserves_inner_growth_step() {
 
     assert_eq!(payload.capacity(), 0);
     payload.push(1).unwrap();
-    assert_eq!(payload.capacity(), 15);
+    assert_eq!(payload.capacity(), 16);
     payload.push(2).unwrap();
-    assert_eq!(payload.capacity(), 15);
+    assert_eq!(payload.capacity(), 16);
 
     let decoded = BytePayload::decode(view.bytes()).unwrap();
     assert_eq!(decoded.payload().as_slice(), &[1, 2]);
-    assert_eq!(storage.resize_lens(), [17]);
-}
-
-#[variable_offset_layout(buffer_offset = any)]
-struct CountedBytePayload {
-    version: u8,
-    #[flexible = 1]
-    payload: Vec<u8>,
+    assert_eq!(storage.resize_lens(), [18]);
 }
 
 #[fixed_offset_layout(buffer_offset = any)]
 struct FlexibleVariableNestedOptionArgs {
     header: u8,
     #[flexible]
-    config: Option<CountedBytePayload>,
+    config: Option<BytePayload>,
 }
 
 #[test]
 fn fixed_offset_layout_supports_flexible_variable_nested_option() {
-    assert_eq!(CountedBytePayload::DATA_LEN_RANGE, (2, 257));
-    assert_eq!(FlexibleVariableNestedOptionArgs::MIN_DATA_LEN, 1);
+    assert_eq!(FlexibleVariableNestedOptionArgs::MIN_DATA_LEN, 2);
     assert_eq!(FlexibleVariableNestedOptionArgs::MAX_DATA_LEN, 259);
 
     let storage = TestStorage::new(
@@ -480,7 +528,7 @@ fn fixed_offset_layout_supports_flexible_variable_nested_option() {
         .encode()
         .unwrap(),
     );
-    let config = CountedBytePayload {
+    let config = BytePayload {
         version: 3,
         payload: vec![9, 8, 7],
     };
@@ -506,10 +554,14 @@ fn fixed_offset_layout_supports_flexible_variable_nested_option() {
         let config_view = view.config().unwrap();
 
         assert_eq!(config_view.version(), 3);
-        assert_eq!(config_view.payload(), &[9, 8, 7]);
+        assert_eq!(config_view.payload().as_slice(), &[9, 8, 7]);
+
+        let (parent, rest) = FlexibleVariableNestedOptionArgs::decode_prefix(&aligned.0).unwrap();
+        assert_eq!(rest, &aligned.0[bytes.len()..]);
+        assert_eq!(parent.config().unwrap().payload().capacity(), 3);
     }
 
-    let shorter = CountedBytePayload {
+    let shorter = BytePayload {
         version: 4,
         payload: vec![5],
     };
@@ -523,17 +575,17 @@ fn fixed_offset_layout_supports_flexible_variable_nested_option() {
         let mut view = FlexibleVariableNestedOptionArgs::decode_mut(&storage).unwrap();
         view.config_mut().set(None).unwrap();
     }
-    assert_eq!(storage.bytes(), vec![7]);
-    assert_eq!(storage.resize_lens(), vec![7, 5, 1]);
+    assert_eq!(storage.bytes(), vec![7, 0]);
+    assert_eq!(storage.resize_lens(), vec![7, 5, 2]);
 }
 
 #[test]
 fn fixed_offset_layout_rejects_invalid_flexible_nested_option() {
     for (bytes, expected_error) in [
-        (vec![7, 0, 3, 1, 9], DataLayoutError::InvalidOptionTag),
+        (vec![7, 2, 3, 1, 9], DataLayoutError::InvalidOptionTag),
         (vec![7, 1], DataLayoutError::TruncatedPayload),
-        (vec![7, 1, 3, 3, 9], DataLayoutError::TruncatedVectorPayload),
-        (vec![7; 260], DataLayoutError::InvalidDataLength),
+        (vec![7, 1, 3, 3, 9], DataLayoutError::LengthExceedsCapacity),
+        (vec![0; 260], DataLayoutError::InvalidDataLength),
     ] {
         let aligned = aligned_copy::<264>(&bytes);
         assert_eq!(
@@ -678,11 +730,11 @@ struct FixedTrailingVecArgs {
 
 #[test]
 fn trailing_u16_vec_decodes_active_elements_and_spare_capacity() {
-    assert_eq!(FixedTrailingVecArgs::MIN_DATA_LEN, 6);
+    assert_eq!(FixedTrailingVecArgs::MIN_DATA_LEN, 8);
     assert_eq!(FixedTrailingVecArgs::MAX_DATA_LEN, 6 + 2 + 0xFFFF * 2);
     assert_eq!(FixedTrailingVecArgs::OFFSETS, [0, 1, 6]);
 
-    let value = FixedTrailingVecArgs {
+    let mut value = FixedTrailingVecArgs {
         header: 7,
         reserved: vec![1, 2],
         tail: vec![0x0102, 0x0304],
@@ -704,7 +756,29 @@ fn trailing_u16_vec_decodes_active_elements_and_spare_capacity() {
         assert_eq!(tail.storage_bytes(), &storage[6..]);
     }
 
+    let next = BytePayload {
+        version: 9,
+        payload: vec![42],
+    };
+    for tail in [vec![], vec![0x0102, 0x0304]] {
+        value.tail = tail;
+        let mut framed = Aligned([0xff; 15]);
+        let rest = value.encode_to(&mut framed.0).unwrap();
+        let unused = next.encode_to(rest).unwrap().len();
+        let (first, rest) =
+            FixedTrailingVecArgs::decode_prefix(&framed.0[..framed.0.len() - unused]).unwrap();
+        assert_eq!(first.bytes().len(), value.encoded_len().unwrap());
+        assert_eq!(first.tail().as_slice(), value.tail);
+        assert_eq!(first.tail().capacity(), value.tail.len());
+        assert_eq!(rest, &[9, 1, 42]);
+        assert_eq!(
+            BytePayload::decode(rest).unwrap().payload().as_slice(),
+            &[42]
+        );
+    }
+
     for (truncated_size, expected) in [
+        (6, DataLayoutError::MissingLengthHeader),
         (7, DataLayoutError::MissingLengthHeader),
         (10, DataLayoutError::LengthExceedsCapacity),
     ] {
@@ -713,6 +787,24 @@ fn trailing_u16_vec_decodes_active_elements_and_spare_capacity() {
             expected
         );
     }
+
+    #[fixed_offset_layout(buffer_offset = 0)]
+    struct SamplesAfterConfigs {
+        #[capacity = 1]
+        configs: Vec<AccountConfig>,
+        #[capacity = 1]
+        reserved_samples: Vec<u16>,
+        #[extendable = 2]
+        samples: Vec<u16>,
+    }
+
+    // The reserved config puts the two u16 payloads at bytes 39 and 43.
+    // An empty vector at either offset can still return a typed empty slice.
+    let bytes = Aligned([0; SamplesAfterConfigs::MIN_DATA_LEN]);
+    assert_eq!(SamplesAfterConfigs::OFFSETS, [0, 38, 41]);
+    let view = SamplesAfterConfigs::decode(&bytes.0).unwrap();
+    assert!(view.reserved_samples().is_empty());
+    assert!(view.samples().as_slice().is_empty());
 }
 
 #[test]
@@ -724,17 +816,18 @@ fn fixed_offset_layout_mutates_trailing_extendable_vec_storage() {
     }
     .encode()
     .unwrap();
-    assert_eq!(empty, [7, 2, 1, 2, 0, 0]);
-    let aligned = aligned_copy::<8>(&empty);
-    for size in [empty.len(), empty.len() + 2] {
-        let view = FixedTrailingVecArgs::decode(&aligned.0[..size]).unwrap();
+    assert_eq!(empty, [7, 2, 1, 2, 0, 0, 0, 0]);
+    let aligned = aligned_copy::<10>(&empty);
+    for spare in [0, 1] {
+        let view = FixedTrailingVecArgs::decode(&aligned.0[..empty.len() + spare * 2]).unwrap();
         let tail = view.tail();
-        assert!(tail.is_empty());
-        assert_eq!(tail.capacity(), 0);
+        assert!(tail.as_slice().is_empty());
+        assert_eq!(tail.encoded_len(), 2);
+        assert_eq!(tail.capacity(), spare);
     }
 
     let storage = TestStorage::new(empty);
-    // A seven-byte step from six bytes leaves room for two whole u16s after the header.
+    // The 13-byte cap leaves room for two whole u16s after the header.
     let capped = MaxLenStorage::new(&storage, 13, 7);
     let mut view = FixedTrailingVecArgs::decode_mut(&capped).unwrap();
     let mut tail = view.tail_mut();
@@ -806,7 +899,7 @@ fn account_view_retains_exclusive_access_after_rejected_and_successful_growth() 
     let mut view = FixedTrailingVecArgs::decode_mut(&account).unwrap();
     let mut tail = view.tail_mut();
     assert_eq!(
-        tail.extend_from_slice(&vec![0; MAX_PERMITTED_DATA_INCREASE / 2]),
+        tail.extend_from_slice(&vec![0; MAX_PERMITTED_DATA_INCREASE / 2 + 1]),
         Err(ProgramError::InvalidRealloc)
     );
     assert_eq!((tail.len(), tail.capacity()), (0, 0));
@@ -843,7 +936,7 @@ fn wide_length_header_round_trips_an_aligned_u16_slice() {
     const COUNT: usize = 0x1_0000;
     const FRAME_LEN: usize = 1 + 8 + COUNT * 2;
 
-    assert_eq!(FixedTrailingWideVecArgs::MIN_DATA_LEN, 1);
+    assert_eq!(FixedTrailingWideVecArgs::MIN_DATA_LEN, 9);
     assert_eq!(
         FixedTrailingWideVecArgs::MAX_DATA_LEN,
         1 + 8 + u32::MAX as usize * 2
@@ -999,7 +1092,7 @@ struct FixedTrailingEntryVecArgs {
 
 #[test]
 fn trailing_entry_vec_round_trips_through_storage() {
-    assert_eq!(FixedTrailingEntryVecArgs::MIN_DATA_LEN, 1);
+    assert_eq!(FixedTrailingEntryVecArgs::MIN_DATA_LEN, 2);
     assert_eq!(
         FixedTrailingEntryVecArgs::MAX_DATA_LEN,
         1 + 1 + 0xFF * FixedEntry::DATA_LEN
@@ -1011,8 +1104,8 @@ fn trailing_entry_vec_round_trips_through_storage() {
         entries: vec![],
     };
     let empty = value.encode().unwrap();
-    assert_eq!(empty, [7]);
-    let aligned = aligned_copy::<1>(&empty);
+    assert_eq!(empty, [7, 0]);
+    let aligned = aligned_copy::<2>(&empty);
     assert!(FixedTrailingEntryVecArgs::decode(&aligned.0)
         .unwrap()
         .entries()

@@ -73,7 +73,7 @@ impl<'a> LayoutBoolMut<'a> {
 /// a key, integer, or array. `LayoutBoolOptionMut` delegates to it with a `u8`
 /// payload. `FlexibleLayoutOptionMut` uses the nested layout's encoded length
 /// to size the slot before encoding the value. All three clear the trailing
-/// field by resizing storage back to its offset.
+/// field by writing a zero tag and resizing storage to the end of that tag.
 pub struct FlexibleOptionBytes<'a, G> {
     borrowed: &'a mut G,
     offset: usize,
@@ -85,15 +85,12 @@ impl<'a, G: LayoutWriteGuard> FlexibleOptionBytes<'a, G> {
         Self { borrowed, offset }
     }
 
-    fn resize(&mut self, payload_len: Option<usize>) -> Result<&mut [u8], ProgramError> {
-        let len = match payload_len {
-            Some(len) => self
-                .offset
-                .checked_add(1)
-                .and_then(|start| start.checked_add(len))
-                .ok_or(DataLayoutError::InvalidDataLength)?,
-            None => self.offset,
-        };
+    fn resize(&mut self, payload_len: usize) -> Result<&mut [u8], ProgramError> {
+        let len = self
+            .offset
+            .checked_add(1)
+            .and_then(|start| start.checked_add(payload_len))
+            .ok_or(DataLayoutError::InvalidDataLength)?;
         self.borrowed.resize(len)?;
         Ok(&mut self.borrowed[self.offset..])
     }
@@ -149,10 +146,8 @@ impl<G: LayoutWriteGuard, T: Pod> LayoutOptionMut<FlexibleOptionBytes<'_, G>, T>
     pub fn set(&mut self, value: Option<T>) -> Result<(), ProgramError> {
         let slot = self
             .slot
-            .resize(value.as_ref().map(core::mem::size_of_val))?;
-        if let Some(value) = value {
-            LayoutOptionMut::new(slot).set(Some(value));
-        }
+            .resize(value.as_ref().map_or(0, core::mem::size_of_val))?;
+        LayoutOptionMut::new(slot).set(value);
         Ok(())
     }
 }
@@ -220,10 +215,10 @@ impl<'a, T: FixedSizeLayout> FixedLayoutOptionMut<'a, T> {
 /// [prefix-decodable](super::PrefixDecodable) layout with known size [bounds](LayoutBounds).
 ///
 /// - `#[flexible] field: Option<AccountConfig>`
-/// - `#[flexible] field: Option<CountedBytePayload>`
+/// - `#[flexible] field: Option<BytePayload>`
 ///
 /// The nested layout can have a fixed size (`AccountConfig`) or contain a
-/// length-prefixed vector (`CountedBytePayload`). `view.field_mut().set(Some(&config))?`
+/// trailing vector (`BytePayload`). `view.field_mut().set(Some(&config))?`
 /// resizes the field to fit the encoded value.
 pub struct FlexibleLayoutOptionMut<'a, G, T> {
     slot: FlexibleOptionBytes<'a, G>,
@@ -241,14 +236,14 @@ impl<'a, G: LayoutWriteGuard, T: Encodable + LayoutBounds> FlexibleLayoutOptionM
 
     pub fn set(&mut self, value: Option<&T>) -> Result<(), ProgramError> {
         let Some(value) = value else {
-            self.slot.resize(None)?;
+            self.slot.resize(0)?[0] = 0;
             return Ok(());
         };
         let len = value.encoded_len()?;
         if !(T::MIN_DATA_LEN..=T::MAX_DATA_LEN).contains(&len) {
             return Err(DataLayoutError::InvalidDataLength.into());
         }
-        write_nested_option(self.slot.resize(Some(len))?, Some(value))
+        write_nested_option(self.slot.resize(len)?, Some(value))
     }
 }
 

@@ -58,18 +58,23 @@ pub trait LayoutWriteGuard: DerefMut<Target = [u8]> {
         requested_len
     }
 
-    /// Called when a vector needs more storage. `min_len` is the required
-    /// total buffer length. Extra capacity must consist of whole elements.
+    /// Grows to at least `min_len` total bytes. The storage policy may reserve
+    /// up to `max_spare_elements` additional whole elements of `element_size` bytes.
     /// Growth has the same alignment and error guarantees as [`Self::resize`].
-    fn grow(&mut self, min_len: usize, element_size: usize) -> Result<(), ProgramError> {
-        let target = self.preferred_growth_len(min_len);
-        let spare = target
+    fn grow(
+        &mut self,
+        min_len: usize,
+        element_size: usize,
+        max_spare_elements: usize,
+    ) -> Result<(), ProgramError> {
+        let spare_bytes = self
+            .preferred_growth_len(min_len)
             .checked_sub(min_len)
             .ok_or(DataLayoutError::LengthExceedsCapacity)?;
-        let remainder = spare
-            .checked_rem(element_size)
+        let spare_elements = spare_bytes
+            .checked_div(element_size)
             .ok_or(DataLayoutError::InvalidDataLength)?;
-        self.resize(target - remainder)
+        self.resize(min_len + spare_elements.min(max_spare_elements) * element_size)
     }
 }
 
@@ -229,11 +234,15 @@ where
 
     fn resize(&self, new_len: usize) -> Result<(), ProgramError> {
         let mut bytes = self.borrow_data_mut()?;
-        if new_len > bytes.len() {
-            bytes.grow(new_len, 1)
-        } else {
-            bytes.resize(new_len)
+        if new_len <= bytes.len() {
+            return bytes.resize(new_len);
         }
+
+        let target = bytes.preferred_growth_len(new_len);
+        if target < new_len {
+            return Err(DataLayoutError::LengthExceedsCapacity.into());
+        }
+        bytes.resize(target)
     }
 }
 
