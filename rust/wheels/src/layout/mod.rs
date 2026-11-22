@@ -384,9 +384,12 @@ pub trait PrefixDecodable {
     ///
     fn decode_prefix<'a>(bytes: &'a [u8]) -> Result<(Self::View<'a>, &'a [u8]), DataLayoutError>;
 
-    /// Decodes a caller-framed storage region. By default the frame must contain
-    /// exactly one encoded value. Layouts with an extendable vector also accept
-    /// spare whole-element slots at the end of the frame.
+    /// Override point for [`Decodable::decode`], which delegates directly to this method.
+    /// Call `decode()` when the slice is one record's storage region. Call
+    /// [`Self::decode_prefix`] to read one record and return the remaining bytes.
+    ///
+    /// The default requires an exact fit. Layouts ending in an extendable vector
+    /// override this method to expose trailing whole-element slots as spare capacity.
     fn decode_frame(bytes: &[u8]) -> Result<Self::View<'_>, DataLayoutError> {
         let (view, remaining) = Self::decode_prefix(bytes)?;
         if !remaining.is_empty() {
