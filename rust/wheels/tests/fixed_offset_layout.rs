@@ -226,7 +226,7 @@ fn fixed_offset_layout_supports_fixed_nested_option() {
     assert_eq!(config_view.enabled(), config.enabled);
 }
 
-#[fixed_offset_layout(buffer_offset = 0)]
+#[fixed_offset_layout(buffer_offset = any)]
 struct FixedNestedOptionVecArgs {
     _padding: [u8; 7],
     #[capacity = 2]
@@ -535,6 +535,9 @@ fn fixed_offset_layout_rejects_invalid_flexible_nested_option() {
     }
 }
 
+// With `any`, `shuttle_id_mut()` returns `LayoutCopyMut` and we write with `.set(101)`.
+// Offset 0 lets this test write through `&mut u32` and `&mut u16` because `shuttle_id`
+// and `checksum` are aligned at bytes 0 and 110. The `u64` at byte 4 still uses `LayoutCopyMut`.
 #[fixed_offset_layout(buffer_offset = 0)]
 struct PrivateTransferFixedArgs {
     shuttle_id: u32,
@@ -654,6 +657,8 @@ fn fixed_offset_layout_mutates_fixed_fields_and_fixed_capacity_vec() {
     assert_eq!(view.checksum(), 0xCAFE);
 }
 
+// The layout needs a known offset to borrow `tail` as `&[u16]`. Its first
+// element is 8 bytes into the struct, so offset 0 gives it an even address.
 #[fixed_offset_layout(buffer_offset = 0)]
 struct FixedTrailingVecArgs {
     header: u8,
@@ -816,6 +821,8 @@ fn account_view_retains_exclusive_access_after_rejected_and_successful_growth() 
     assert_eq!(decoded.tail().as_slice(), &[42]);
 }
 
+// The layout needs an odd base offset to borrow `payload` as `&[u16]` after
+// the 1-byte tag and 8-byte length header. Offset 1 puts element 0 at byte 10.
 #[fixed_offset_layout(buffer_offset = 1)]
 struct FixedTrailingWideVecArgs {
     tag: u8,
@@ -840,7 +847,6 @@ fn wide_length_header_round_trips_an_aligned_u16_slice() {
         payload: (0..=u16::MAX).collect(),
     };
     let mut aligned = Aligned([0; 1 + FRAME_LEN]);
-    // Starting the frame at byte 1 puts the u16 payload at byte 10.
     let frame = &mut aligned.0[1..];
     assert!(value.encode_to(frame).unwrap().is_empty());
     assert_eq!(frame[0], 7);

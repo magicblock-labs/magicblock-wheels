@@ -127,7 +127,7 @@
 //! | `buffer_offset` | When to use it |
 //! |---|---|
 //! | `any` | The struct can start anywhere. Its getters copy values or borrow types with alignment 1.<ul><li>`threshold: u16`</li><li>`authority: Pubkey`</li></ul> |
-//! | `0` through `7` | A getter borrows a type with alignment greater than 1. Use the struct's starting address modulo 8. The macro rejects `any` for these fields.<ul><li>`items: Vec<u16>`</li><li>`counters: [u32; 3]`</li></ul> |
+//! | `0` through `7` | Use the struct's starting address modulo 8 to guarantee alignment. This also enables [direct mutation](#mutability) of aligned fields in fixed layouts. The following borrowed fields require a numeric offset.<ul><li>`items: Vec<u16>`</li><li>`counters: [u32; 3]`</li></ul> |
 //!
 //! <aside role="note" style="border-inline-start: 4px solid #548ed0; background-color: rgba(84, 142, 208, 0.1); padding: 0.75rem 1rem;">
 //! <strong><span aria-hidden="true">ⓘ</span> How to check alignment</strong>
@@ -165,8 +165,8 @@
 //!
 //! | Field form in `fixed_offset_layout` | Generated mutable helper | Mutation behavior |
 //! |---|---|---|
-//! | Aligned integer primitives, [`Pubkey`](crate::Pubkey)/`Address`, and fixed-size integer arrays | `&mut T` | Borrows the aligned field directly.<br><br>`*view.amount_mut() += 1;` |
-//! | Unaligned integer primitives or fixed-size integer arrays | [`LayoutCopyMut`] | Exposes `get()` and `set(value)` and writes bytes without creating an invalid `&mut T`.<br><br>`view.amount_mut().set(42);` |
+//! | Integer, [`Pubkey`](crate::Pubkey)/`Address`, or fixed-size integer array with guaranteed alignment | `&mut T` | A numeric `buffer_offset` allows direct writes when the macro can prove the field is aligned. Types with alignment 1, such as `u8` and `Pubkey`, also allow direct writes with `any`.<br><br>`*view.shuttle_id_mut() = 101;` |
+//! | Copyable integer or fixed-size integer array whose alignment cannot be guaranteed | [`LayoutCopyMut`] | With `any`, a field like `shuttle_id: u32` uses `get()` and `set(value)` to copy its bytes. A numeric offset also uses this wrapper if the field's position does not guarantee alignment.<br><br>`view.shuttle_id_mut().set(101);` |
 //! | `bool` | [`LayoutBoolMut`] | Exposes `get()` and `set(bool)` because the encoded form is a backing `u8`.<br><br>`view.enabled_mut().set(true);` |
 //! | Fixed `Option<T>` | [`LayoutOptionMut`] or [`LayoutBoolOptionMut`] | Updates the tag and payload in place; the reserved option slot size does not change.<br><br>`view.authority_mut().set(Some(key));` |
 //! | Trailing flexible `Option<T>` | [`LayoutOptionMut`] or [`LayoutBoolOptionMut`] | `None` resizes storage back to the field offset; `Some` resizes to tag plus payload length.<br><br>`view.delegate_mut().set(None)?;` |

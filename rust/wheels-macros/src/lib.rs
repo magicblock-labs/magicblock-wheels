@@ -171,9 +171,11 @@ mod variable_offset_layout;
 /// Methods:
 ///   - all layouts emit `decode_mut(storage: &impl LayoutStorageMut)`,
 ///     returning a view that holds the exclusive data borrow
-///   - mutable views expose `<field>_mut()` helpers. Plain aligned POD fields
-///     return `&mut T`, encoded bool/Option fields return slot helpers,
-///     user-defined nested-layout options return `FixedLayoutOptionMut` or
+///   - mutable views expose `<field>_mut()` helpers. A plain POD field returns
+///     `&mut T` when its alignment is guaranteed. A copy-decoded integer such
+///     as `u32` uses `LayoutCopyMut` with `buffer_offset = any` or when its
+///     numeric offset cannot guarantee alignment. Encoded bool/Option fields
+///     return slot helpers, user-defined nested-layout options return `FixedLayoutOptionMut` or
 ///     `FlexibleLayoutOptionMut`,
 ///     fixed-capacity Vec fields return `FixedCapacityVec`, and trailing
 ///     extendable Vec fields return `ExtendableVec`.
