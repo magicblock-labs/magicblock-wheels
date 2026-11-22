@@ -386,23 +386,32 @@ struct BytePayload {
 fn byte_payload_extends_by_slices_up_to_the_length_header_limit() {
     assert_eq!(BytePayload::MIN_DATA_LEN, 3);
     assert_eq!(BytePayload::MAX_DATA_LEN, 258);
-    for (bytes, error) in [
-        (&[7][..], DataLayoutError::MissingLengthHeader),
-        (&[7, 0], DataLayoutError::MissingCapacityHeader),
-        (&[7, 2, 1, 42], DataLayoutError::LengthExceedsCapacity),
-        (&[7, 0, 2, 42], DataLayoutError::TruncatedVectorPayload),
+    // Successful rows give (len, capacity).
+    for (bytes, expected) in [
+        (&[7][..], Err(DataLayoutError::MissingLengthHeader)),
+        (&[7, 0], Err(DataLayoutError::MissingCapacityHeader)),
+        (&[7, 0, 0], Ok((0, 0))),
+        (&[7, 2, 1, 42], Err(DataLayoutError::LengthExceedsCapacity)),
+        (&[7, 0, 2, 42], Err(DataLayoutError::TruncatedVectorPayload)),
+        (&[7, 0, 2, 0, 0], Ok((0, 2))),
+        (&[7, 1, 2, 42, 0], Ok((1, 2))),
     ] {
-        assert_eq!(BytePayload::decode_prefix(bytes).unwrap_err(), error);
+        let decoded = BytePayload::decode_prefix(bytes).map(|(view, rest)| {
+            assert!(rest.is_empty());
+            let payload = view.payload();
+            (payload.len(), payload.capacity())
+        });
+        assert_eq!(decoded, expected, "{bytes:?}");
+
         let storage = TestStorage::new(bytes.to_vec());
-        assert_eq!(
-            DataLayoutError::try_from(BytePayload::decode_prefix_mut(&storage).unwrap_err()),
-            Ok(error)
-        );
+        let decoded = BytePayload::decode_prefix_mut(&storage)
+            .map(|mut view| {
+                let payload = view.payload_mut();
+                (payload.len(), payload.capacity())
+            })
+            .map_err(|error| DataLayoutError::try_from(error).expect("expected a layout error"));
+        assert_eq!(decoded, expected, "{bytes:?}");
     }
-    assert!(BytePayload::decode(&[7, 0, 0])
-        .unwrap()
-        .payload()
-        .is_empty());
     let storage = TestStorage::new(vec![7, 0, 0]);
     let mut view = BytePayload::decode_mut(&storage).unwrap();
     let mut payload = view.payload_mut();
