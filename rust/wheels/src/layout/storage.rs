@@ -51,11 +51,25 @@ pub trait LayoutWriteGuard: DerefMut<Target = [u8]> {
     /// and length must remain accessible through this guard.
     fn resize(&mut self, new_len: usize) -> Result<(), ProgramError>;
 
+    /// Returns the preferred total length in bytes, taking growth steps and
+    /// caps into account. A cap may produce a length below `requested_len`.
+    /// Override this to apply a growth policy through nested storage wrappers.
+    fn preferred_growth_len(&self, requested_len: usize) -> usize {
+        requested_len
+    }
+
     /// Called when a vector needs more storage. `min_len` is the required
     /// total buffer length. Extra capacity must consist of whole elements.
     /// Growth has the same alignment and error guarantees as [`Self::resize`].
-    fn grow(&mut self, min_len: usize, _element_size: usize) -> Result<(), ProgramError> {
-        self.resize(min_len)
+    fn grow(&mut self, min_len: usize, element_size: usize) -> Result<(), ProgramError> {
+        let target = self.preferred_growth_len(min_len);
+        let spare = target
+            .checked_sub(min_len)
+            .ok_or(DataLayoutError::LengthExceedsCapacity)?;
+        let remainder = spare
+            .checked_rem(element_size)
+            .ok_or(DataLayoutError::InvalidDataLength)?;
+        self.resize(target - remainder)
     }
 }
 
@@ -139,6 +153,10 @@ impl LayoutWriteGuard for AccountWriteGuard<'_> {
 /// A trailing Vec grows in additive steps, with spare bytes rounded down to
 /// whole elements. Flexible options and shrink operations use the exact
 /// requested length.
+///
+/// One wrapper can set both the cap and the growth step. A helper that receives
+/// already-wrapped storage can add its own cap with a zero step. Nested
+/// wrappers use the smallest cap and the largest step.
 pub struct MaxLenStorage<'a, Storage: ?Sized> {
     storage: &'a Storage,
     max_data_len: usize,
@@ -148,9 +166,8 @@ pub struct MaxLenStorage<'a, Storage: ?Sized> {
 impl<'a, Storage: ?Sized> MaxLenStorage<'a, Storage> {
     /// Creates a wrapper around `storage`.
     ///
-    /// `max_len` is an inclusive cap on the absolute backing storage length in
-    /// bytes. `step` controls extra growth beyond the requested length. A step
-    /// of zero preserves exact growth while still enforcing `max_len`.
+    /// `max_data_len` caps the total buffer length in bytes. On growth,
+    /// `resize_step` requests that many bytes beyond the current length.
     pub const fn new(storage: &'a Storage, max_data_len: usize, resize_step: usize) -> Self {
         Self {
             storage,
@@ -249,18 +266,10 @@ impl<G: LayoutWriteGuard> LayoutWriteGuard for MaxLenWriteGuard<G> {
         self.borrowed.resize(new_len)
     }
 
-    fn grow(&mut self, min_len: usize, element_size: usize) -> Result<(), ProgramError> {
-        if min_len > self.max_data_len {
-            return Err(DataLayoutError::LengthExceedsCapacity.into());
-        }
-        let stepped = self
-            .len()
-            .saturating_add(self.resize_step)
-            .min(self.max_data_len);
-        let spare = stepped.saturating_sub(min_len);
-        let remainder = spare
-            .checked_rem(element_size)
-            .ok_or(DataLayoutError::InvalidDataLength)?;
-        self.borrowed.resize(min_len + (spare - remainder))
+    fn preferred_growth_len(&self, requested_len: usize) -> usize {
+        let stepped = self.len().saturating_add(self.resize_step);
+        self.borrowed
+            .preferred_growth_len(requested_len.max(stepped))
+            .min(self.max_data_len)
     }
 }

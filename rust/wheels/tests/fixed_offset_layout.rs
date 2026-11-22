@@ -425,6 +425,33 @@ fn max_len_storage_grows_extendable_vec_in_steps_up_to_its_limit() {
     assert_eq!(view.payload().capacity(), 7);
 }
 
+#[test]
+fn cap_only_wrapper_preserves_inner_growth_step() {
+    let storage = TestStorage::new(vec![7]);
+
+    // One `MaxLenStorage` is enough to set both the 64-byte cap and the 16-byte
+    // growth step.
+    //
+    // This test adds a second wrapper with the same cap and a zero step to
+    // verify that it preserves the inner step. The first push grows the buffer
+    // from 1 to 17 bytes, and the second reuses that space.
+    let inner = MaxLenStorage::new(&storage, 64, 16);
+    let outer = MaxLenStorage::new(&inner, 64, 0);
+
+    let mut view = BytePayload::decode_mut(&outer).unwrap();
+    let mut payload = view.payload_mut();
+
+    assert_eq!(payload.capacity(), 0);
+    payload.push(1).unwrap();
+    assert_eq!(payload.capacity(), 15);
+    payload.push(2).unwrap();
+    assert_eq!(payload.capacity(), 15);
+
+    let decoded = BytePayload::decode(view.bytes()).unwrap();
+    assert_eq!(decoded.payload().as_slice(), &[1, 2]);
+    assert_eq!(storage.resize_lens(), [17]);
+}
+
 #[fixed_offset_layout(buffer_offset = 0)]
 struct FlexibleVariableNestedOptionArgs {
     header: u8,
@@ -716,6 +743,28 @@ fn fixed_offset_layout_mutates_trailing_extendable_vec_storage() {
     let aligned = aligned_copy::<12>(&bytes);
     let view = FixedTrailingVecArgs::decode(&aligned.0[..bytes.len()]).unwrap();
     assert_eq!((view.tail().len(), view.tail().capacity()), (0, 2));
+}
+
+#[test]
+fn nested_storage_caps_limit_growth_to_whole_elements() {
+    for (inner_cap, inner_step, outer_cap, outer_step) in [(64, 16, 13, 0), (13, 0, 64, 16)] {
+        let storage = TestStorage::new(vec![0; FixedTrailingVecArgs::MIN_DATA_LEN]);
+        let inner = MaxLenStorage::new(&storage, inner_cap, inner_step);
+        let outer = MaxLenStorage::new(&inner, outer_cap, outer_step);
+        let mut view = FixedTrailingVecArgs::decode_mut(&outer).unwrap();
+        let mut tail = view.tail_mut();
+
+        // The u16 payload starts at byte 8. A 13-byte cap fits two elements.
+        tail.push(1).unwrap();
+        tail.push(2).unwrap();
+        assert_eq!(
+            tail.push(3).unwrap_err(),
+            ProgramError::from(DataLayoutError::LengthExceedsCapacity)
+        );
+        assert_eq!(storage.resize_lens(), [12]);
+        let decoded = FixedTrailingVecArgs::decode(view.bytes()).unwrap();
+        assert_eq!(decoded.tail().as_slice(), &[1, 2]);
+    }
 }
 
 #[test]
