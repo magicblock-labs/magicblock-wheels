@@ -132,17 +132,9 @@
 //!   A mutable view can push into spare slots or grow the backing storage.
 //!   Pass only this record's storage to `decode_mut()` so pushes use its own slots.
 //! - **Flexible** vectors can appear **anywhere** in a variable-offset struct.
-//!   In `[count][items][checksum]`, the decoder uses the count to locate the
-//!   checksum. To append an item, update the owned vector and re-encode the struct.
-//!
-//! ## Migrating previously encoded empty fields
-//!
-//! Older fixed-offset records could end immediately before an empty extendable
-//! vector or an absent flexible option. At the known record boundary, insert
-//! `N` zero bytes for the omitted vector count or one zero byte for the omitted
-//! option tag. For example, `[07]` becomes `[07, 00, 00]` for an empty
-//! `#[extendable = 2]` vector or `[07, 00]` for a flexible `None`. Use the old
-//! record length to locate that boundary when another record follows.
+//!   In `[vec_field: [count][items]][next_field]`, the decoder uses the count
+//!   to locate `next_field`.
+//!   To append an item, update the owned vector and re-encode the struct.
 //!
 //! # Alignment Requirement
 //!
