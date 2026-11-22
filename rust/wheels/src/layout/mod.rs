@@ -128,13 +128,13 @@
 //!
 //! Both write the element count in `N` little-endian bytes, including a zero count.
 //!
-//! - **Extendable** vectors must be the **last field** of a fixed-offset struct.
-//!   A mutable view can push into spare slots or grow the backing storage.
-//!   Pass only this record's storage to `decode_mut()` so pushes use its own slots.
-//! - **Flexible** vectors can appear **anywhere** in a variable-offset struct.
-//!   In `[vec_field: [count][items]][next_field]`, the decoder uses the count
-//!   to locate `next_field`.
-//!   To append an item, update the owned vector and re-encode the struct.
+//! | `#[extendable = N]` | `#[flexible = N]` |
+//! |---|---|
+//! | Must be the **last field** of a fixed-offset struct. | Can appear **anywhere** in a variable-offset struct. |
+//! | To append, pass the record's own storage region to `decode_mut()`. A `push` reuses a spare slot or grows that storage. | To append, update the owned vector and re-encode the struct. |
+//!
+//! For a flexible vector followed by another field, the layout is
+//! `[vec_field: [count][items]][next_field]`. The decoder uses the count to locate `next_field`.
 //!
 //! # Alignment Requirement
 //!
