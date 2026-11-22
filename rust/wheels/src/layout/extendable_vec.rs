@@ -485,31 +485,27 @@ pub fn decode_extendable_vec_header(
     if !(1..=8).contains(&len_width) || elem_size == 0 {
         return Err(DataLayoutError::InvalidDataLength);
     }
-    let bytes = bytes
+    let (len_header, rest) = bytes
         .get(offset..)
+        .and_then(|field| field.split_at_checked(len_width))
         .ok_or(DataLayoutError::MissingLengthHeader)?;
-    let available = bytes
-        .len()
-        .checked_sub(2 * len_width)
-        .ok_or(DataLayoutError::MissingLengthHeader)?;
-    let len = read_len_header(bytes, 0, len_width)?;
-    let capacity = read_len_header(bytes, len_width, len_width)?;
+    let (capacity_header, payload) = rest
+        .split_at_checked(len_width)
+        .ok_or(DataLayoutError::MissingCapacityHeader)?;
+    let len = read_len_header(len_header)?;
+    let capacity = read_len_header(capacity_header)?;
     if len > capacity || capacity > max_len(len_width) {
         return Err(DataLayoutError::LengthExceedsCapacity);
     }
-    if capacity > available / elem_size {
+    if capacity > payload.len() / elem_size {
         return Err(DataLayoutError::TruncatedVectorPayload);
     }
     Ok((len, capacity))
 }
 
-fn read_len_header(
-    bytes: &[u8],
-    offset: usize,
-    len_width: usize,
-) -> Result<usize, DataLayoutError> {
+fn read_len_header(bytes: &[u8]) -> Result<usize, DataLayoutError> {
     let mut raw = [0u8; 8];
-    raw[..len_width].copy_from_slice(&bytes[offset..offset + len_width]);
+    raw[..bytes.len()].copy_from_slice(bytes);
     let len = u64::from_le_bytes(raw);
     usize::try_from(len).map_err(|_| DataLayoutError::LengthExceedsCapacity)
 }

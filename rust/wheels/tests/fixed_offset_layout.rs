@@ -388,15 +388,15 @@ fn byte_payload_extends_by_slices_up_to_the_length_header_limit() {
     assert_eq!(BytePayload::MAX_DATA_LEN, 258);
     for (bytes, error) in [
         (&[7][..], DataLayoutError::MissingLengthHeader),
-        (&[7, 0], DataLayoutError::MissingLengthHeader),
+        (&[7, 0], DataLayoutError::MissingCapacityHeader),
         (&[7, 2, 1, 42], DataLayoutError::LengthExceedsCapacity),
         (&[7, 0, 2, 42], DataLayoutError::TruncatedVectorPayload),
     ] {
         assert_eq!(BytePayload::decode_prefix(bytes).unwrap_err(), error);
         let storage = TestStorage::new(bytes.to_vec());
         assert_eq!(
-            BytePayload::decode_prefix_mut(&storage).unwrap_err(),
-            ProgramError::from(error)
+            DataLayoutError::try_from(BytePayload::decode_prefix_mut(&storage).unwrap_err()),
+            Ok(error)
         );
     }
     assert!(BytePayload::decode(&[7, 0, 0])
@@ -827,12 +827,20 @@ fn trailing_u16_vec_decodes_active_elements_and_spare_capacity() {
     for (truncated_size, expected) in [
         (6, DataLayoutError::MissingLengthHeader),
         (7, DataLayoutError::MissingLengthHeader),
-        (9, DataLayoutError::MissingLengthHeader),
+        (8, DataLayoutError::MissingCapacityHeader),
+        (9, DataLayoutError::MissingCapacityHeader),
         (12, DataLayoutError::TruncatedVectorPayload),
     ] {
+        let bytes = &aligned.0[..truncated_size];
+        assert_eq!(FixedTrailingVecArgs::decode(bytes).unwrap_err(), expected);
         assert_eq!(
-            FixedTrailingVecArgs::decode(&aligned.0[..truncated_size]).unwrap_err(),
-            expected
+            wheels::layout::decode_extendable_vec_header(
+                bytes,
+                FixedTrailingVecArgs::OFFSETS[2],
+                2,
+                size_of::<u16>(),
+            ),
+            Err(expected)
         );
     }
 

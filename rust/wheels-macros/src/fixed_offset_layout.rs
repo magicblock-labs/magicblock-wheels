@@ -164,8 +164,11 @@ pub(crate) fn expand_fixed_offset_layout(
 
     let has_trailing_variable_field = trailing_variable_field.is_some();
     let (short_header_check, decode_prefix_mut) = match &trailing_variable_field {
-        Some((_, ComptimeOptionalLen::ArrayLen { .. })) => (
+        Some((_, ComptimeOptionalLen::ArrayLen { len_width, .. })) => (
             quote! {
+                if bytes.len() >= #datalen_expr + #len_width {
+                    return Err(::wheels::DataLayoutError::MissingCapacityHeader);
+                }
                 if bytes.get(..#datalen_expr).is_some() {
                     return Err(::wheels::DataLayoutError::MissingLengthHeader);
                 }
