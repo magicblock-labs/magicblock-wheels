@@ -217,13 +217,13 @@ impl<'a, T: FixedSizeLayout> FixedLayoutOptionMut<'a, T> {
 }
 
 /// Mutable slot for a final `#[flexible] Option<T>` containing a user-defined
-/// layout whose encoded size has known [bounds](LayoutBounds).
+/// [prefix-decodable](super::PrefixDecodable) layout with known size [bounds](LayoutBounds).
 ///
 /// - `#[flexible] field: Option<AccountConfig>`
-/// - `#[flexible] field: Option<BytePayload>`
+/// - `#[flexible] field: Option<CountedBytePayload>`
 ///
 /// The nested layout can have a fixed size (`AccountConfig`) or contain a
-/// trailing vector (`BytePayload`). `view.field_mut().set(Some(&config))?`
+/// length-prefixed vector (`CountedBytePayload`). `view.field_mut().set(Some(&config))?`
 /// resizes the field to fit the encoded value.
 pub struct FlexibleLayoutOptionMut<'a, G, T> {
     slot: FlexibleOptionBytes<'a, G>,

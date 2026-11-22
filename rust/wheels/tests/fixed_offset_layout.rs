@@ -13,7 +13,7 @@ use wheels::{
         Decodable, Encodable, LayoutStorage, LayoutStorageMut, LayoutWriteGuard, MaxLenStorage,
         PrefixDecodable,
     },
-    DataLayoutError, Pubkey,
+    variable_offset_layout, DataLayoutError, Pubkey,
 };
 
 #[repr(align(8))]
@@ -452,15 +452,23 @@ fn cap_only_wrapper_preserves_inner_growth_step() {
     assert_eq!(storage.resize_lens(), [17]);
 }
 
+#[variable_offset_layout(buffer_offset = any)]
+struct CountedBytePayload {
+    version: u8,
+    #[flexible = 1]
+    payload: Vec<u8>,
+}
+
 #[fixed_offset_layout(buffer_offset = any)]
 struct FlexibleVariableNestedOptionArgs {
     header: u8,
     #[flexible]
-    config: Option<BytePayload>,
+    config: Option<CountedBytePayload>,
 }
 
 #[test]
 fn fixed_offset_layout_supports_flexible_variable_nested_option() {
+    assert_eq!(CountedBytePayload::DATA_LEN_RANGE, (2, 257));
     assert_eq!(FlexibleVariableNestedOptionArgs::MIN_DATA_LEN, 1);
     assert_eq!(FlexibleVariableNestedOptionArgs::MAX_DATA_LEN, 259);
 
@@ -472,7 +480,7 @@ fn fixed_offset_layout_supports_flexible_variable_nested_option() {
         .encode()
         .unwrap(),
     );
-    let config = BytePayload {
+    let config = CountedBytePayload {
         version: 3,
         payload: vec![9, 8, 7],
     };
@@ -498,10 +506,10 @@ fn fixed_offset_layout_supports_flexible_variable_nested_option() {
         let config_view = view.config().unwrap();
 
         assert_eq!(config_view.version(), 3);
-        assert_eq!(config_view.payload().as_slice(), &[9, 8, 7]);
+        assert_eq!(config_view.payload(), &[9, 8, 7]);
     }
 
-    let shorter = BytePayload {
+    let shorter = CountedBytePayload {
         version: 4,
         payload: vec![5],
     };
@@ -524,7 +532,7 @@ fn fixed_offset_layout_rejects_invalid_flexible_nested_option() {
     for (bytes, expected_error) in [
         (vec![7, 0, 3, 1, 9], DataLayoutError::InvalidOptionTag),
         (vec![7, 1], DataLayoutError::TruncatedPayload),
-        (vec![7, 1, 3, 3, 9], DataLayoutError::LengthExceedsCapacity),
+        (vec![7, 1, 3, 3, 9], DataLayoutError::TruncatedVectorPayload),
         (vec![7; 260], DataLayoutError::InvalidDataLength),
     ] {
         let aligned = aligned_copy::<264>(&bytes);
