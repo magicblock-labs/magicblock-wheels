@@ -171,6 +171,23 @@
 //!
 //! </aside>
 //!
+//! A nested layout's encoded width also contributes to the next field's offset.
+//! Here the count and the single reserved byte put `counters` at byte 2.
+//! Insert two padding bytes before `counters` to place it at byte 4.
+//!
+//! ```compile_fail,E0080
+//! # extern crate alloc;
+//! use wheels::fixed_offset_layout;
+//! #[fixed_offset_layout(buffer_offset = any)]
+//! struct Entry { value: u8 }
+//! #[fixed_offset_layout(buffer_offset = 0)]
+//! struct Record {
+//!     #[capacity = 1]
+//!     entries: Vec<Entry>,
+//!     counters: [u32; 4],
+//! }
+//! ```
+//!
 //! # Mutability
 //!
 //! Mutability is supported only by
