@@ -113,7 +113,7 @@
 //! | Attribute | `fixed_offset_layout` | `variable_offset_layout` | Meaning |
 //! |---|---|---|---|
 //! | `buffer_offset = 0..=7` | Struct-level; required. | Struct-level; required. | Declares the known byte offset of the decoded slice from an 8-byte aligned base. The decoder validates that pointer offset, and the macro uses it to decide which borrowed views are alignment-safe. |
-//! | `buffer_offset = unknown` | Struct-level; required alternative. | Struct-level; required alternative. | Use when the slice start address is not known. The decoder skips pointer-offset checking, and the macro rejects borrowed views that need alignment greater than 1. |
+//! | `buffer_offset = any` | Struct-level; required alternative. | Struct-level; required alternative. | Use when the slice can start at any address. The decoder skips pointer-offset checking, and the macro rejects borrowed views that need alignment greater than 1. |
 //! | `option = implicit` | Not supported. | Struct-level; optional. | Backward-compatibility mode for structs without Vec fields. It omits option tags and infers option presence from the total encoded length. |
 //! | `#[capacity = N]` | Field-level; fixed-capacity `Vec<T>` only. | Not supported. | Reserves exactly `N` element slots in fixed-offset storage. The active Vec length may change up to that schema capacity without resizing storage. |
 //! | `#[extendable = N]` | Field-level; final `Vec<T>` only. | Not supported. | Uses an `N`-byte length header (`1..=8`) for a trailing Vec. `N` is length-header width, not capacity. Canonical encoding contains only active elements, while decoding larger trailing storage exposes spare capacity through [`ExtendableVec`]. |
@@ -126,8 +126,8 @@
 //!
 //! | `buffer_offset` | When to use it |
 //! |---|---|
-//! | `unknown` | The struct can start anywhere. Its getters copy values or borrow types with alignment 1.<ul><li>`threshold: u16`</li><li>`authority: Pubkey`</li></ul> |
-//! | `0` through `7` | A getter borrows a type with alignment greater than 1. Use the struct's starting address modulo 8. The macro rejects `unknown` for these fields.<ul><li>`items: Vec<u16>`</li><li>`counters: [u32; 3]`</li></ul> |
+//! | `any` | The struct can start anywhere. Its getters copy values or borrow types with alignment 1.<ul><li>`threshold: u16`</li><li>`authority: Pubkey`</li></ul> |
+//! | `0` through `7` | A getter borrows a type with alignment greater than 1. Use the struct's starting address modulo 8. The macro rejects `any` for these fields.<ul><li>`items: Vec<u16>`</li><li>`counters: [u32; 3]`</li></ul> |
 //!
 //! <aside role="note" style="border-inline-start: 4px solid #548ed0; background-color: rgba(84, 142, 208, 0.1); padding: 0.75rem 1rem;">
 //! <strong><span aria-hidden="true">ⓘ</span> How to check alignment</strong>
@@ -142,7 +142,7 @@
 //!   a struct starting at byte 1 puts the first `u16` at byte `1 + 1 + 8 = 10`
 //!   (even, aligned). Starting at byte 0 puts it at byte 9 (odd, misaligned).
 //! - **Packing nested structs.** Two 39-byte entries starting at bytes 8 and 47
-//!   can both use `unknown` if their fields allow it. A child declaring
+//!   can both use `any` if their fields allow it. A child declaring
 //!   `buffer_offset = 0` can start at byte 8, but byte 47 fails its offset check.
 //!
 //! </aside>

@@ -128,7 +128,7 @@ fn max_len_storage_shrinks_exactly() {
 }
 
 #[derive(Clone)]
-#[fixed_offset_layout(buffer_offset = unknown)]
+#[fixed_offset_layout(buffer_offset = any)]
 struct AccountConfig {
     enabled: bool,
     authority: Address,
@@ -184,7 +184,7 @@ fn account_config_round_trips_and_mutates_scalar_fields() {
     assert_eq!(view.sponsored(), Some(true));
 }
 
-#[fixed_offset_layout(buffer_offset = unknown)]
+#[fixed_offset_layout(buffer_offset = any)]
 struct FixedNestedOptionArgs {
     header: u8,
     config: Option<AccountConfig>,
@@ -297,7 +297,7 @@ fn flexible_option_round_trips_a_fixed_size_child() {
     assert_eq!(view.config().unwrap().threshold(), config.threshold);
 }
 
-#[fixed_offset_layout(buffer_offset = unknown)]
+#[fixed_offset_layout(buffer_offset = any)]
 struct FlexiblePubkeyArgs {
     header: u8,
     #[flexible]
@@ -344,7 +344,7 @@ fn flexible_pubkey_rejects_invalid_tag_and_truncated_key() {
     }
 }
 
-#[fixed_offset_layout(buffer_offset = unknown)]
+#[fixed_offset_layout(buffer_offset = any)]
 struct BytePayload {
     version: u8,
     #[extendable = 1]
@@ -858,7 +858,7 @@ fn wide_length_header_round_trips_an_aligned_u16_slice() {
     );
 }
 
-#[fixed_offset_layout(buffer_offset = unknown)]
+#[fixed_offset_layout(buffer_offset = any)]
 #[derive(Clone)]
 struct FixedEntry {
     id: u16,

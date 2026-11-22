@@ -70,7 +70,7 @@ mod variable_offset_layout;
 ///
 /// Struct attributes:
 ///   - `#[fixed_offset_layout(buffer_offset = N)]`, where `N` is `0..=7`
-///   - `#[fixed_offset_layout(buffer_offset = unknown)]`
+///   - `#[fixed_offset_layout(buffer_offset = any)]`
 ///
 ///     - `buffer_offset`
 ///
@@ -94,7 +94,7 @@ mod variable_offset_layout;
 ///       - borrowed getters are only generated when their alignment can be
 ///         guaranteed for every valid encoding under this `buffer_offset`
 ///
-///       Use `buffer_offset = unknown` when the slice may start at any
+///       Use `buffer_offset = any` when the slice may start at any
 ///       address. This mode emits no pointer-offset check and rejects borrowed
 ///       views whose required alignment is greater than 1. Copy-decoded fields
 ///       such as integer primitives remain supported.
@@ -228,7 +228,7 @@ pub fn fixed_offset_layout(attr: TokenStream, item: TokenStream) -> TokenStream 
 ///
 /// Struct attributes:
 ///   - `#[variable_offset_layout(buffer_offset = N)]`, where `N` is `0..=7`
-///   - `#[variable_offset_layout(buffer_offset = unknown)]`
+///   - `#[variable_offset_layout(buffer_offset = any)]`
 ///   - `#[variable_offset_layout(buffer_offset = N, option = implicit)]`
 ///
 ///     - `buffer_offset`
@@ -253,7 +253,7 @@ pub fn fixed_offset_layout(attr: TokenStream, item: TokenStream) -> TokenStream 
 ///       - borrowed getters are only generated when their alignment can be
 ///         guaranteed for every valid encoding under this `buffer_offset`
 ///
-///       Use `buffer_offset = unknown` when the slice may start at any
+///       Use `buffer_offset = any` when the slice may start at any
 ///       address, such as when decoding the remaining bytes after
 ///       variable-length data. This mode emits no pointer-offset check and
 ///       rejects borrowed views whose required alignment is greater than 1.
