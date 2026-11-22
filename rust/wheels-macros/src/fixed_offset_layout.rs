@@ -163,20 +163,25 @@ pub(crate) fn expand_fixed_offset_layout(
     let where_clause = impl_where_clause(&where_bounds);
 
     let has_trailing_variable_field = trailing_variable_field.is_some();
-    let (short_header_check, decode_frame) = match &trailing_variable_field {
-        Some((_, ComptimeOptionalLen::ArrayLen { elem_size, .. })) => (
+    let (short_header_check, decode_prefix_mut) = match &trailing_variable_field {
+        Some((_, ComptimeOptionalLen::ArrayLen { .. })) => (
             quote! {
                 if bytes.get(..#datalen_expr).is_some() {
                     return Err(::wheels::DataLayoutError::MissingLengthHeader);
                 }
             },
             quote! {
-                fn decode_frame(bytes: &[u8]) -> core::result::Result<Self::View<'_>, ::wheels::DataLayoutError> {
-                    let end = Self::__validate_prefix(bytes)?;
-                    if bytes.len() > Self::MAX_DATA_LEN || !(bytes.len() - end).is_multiple_of(#elem_size) {
-                        return Err(::wheels::DataLayoutError::InvalidDataLength);
-                    }
-                    Ok(#view_name { bytes })
+                /// Borrows storage to mutate its first record. Growing the vector moves
+                /// any following bytes after the newly reserved slots.
+                /// The view's `bytes()` and `storage_len()` cover the entire backing storage.
+                pub fn decode_prefix_mut<'a, S>(storage: &'a S)
+                    -> core::result::Result<#view_mut_name<'a, S>, ::pinocchio::error::ProgramError>
+                where
+                    S: ::wheels::layout::LayoutStorageMut + ?Sized,
+                {
+                    let borrowed = storage.borrow_data_mut()?;
+                    Self::__validate_prefix(&borrowed)?;
+                    Ok(#view_mut_name { borrowed })
                 }
             },
         ),
@@ -222,7 +227,7 @@ pub(crate) fn expand_fixed_offset_layout(
             };
             (
                 quote! {
-                    /// Minimum encoded length, including the trailing field's count or tag.
+                    /// Minimum encoded length, including the trailing field's headers.
                     pub const MIN_DATA_LEN: usize = #datalen_expr + #header_size;
                     pub const MAX_DATA_LEN: usize = #datalen_expr + #max_datalen;
                 },
@@ -253,8 +258,6 @@ pub(crate) fn expand_fixed_offset_layout(
                 let (bytes, remaining) = bytes.split_at(end);
                 Ok((#view_name { bytes }, remaining))
             }
-
-            #decode_frame
         }
     };
     let layout_bounds_impl = if has_trailing_variable_field {
@@ -329,6 +332,7 @@ pub(crate) fn expand_fixed_offset_layout(
             pub const OFFSETS: [usize; #field_count_expr] = #offsets_expr;
 
             #decode_mut_fn
+            #decode_prefix_mut
 
             fn __validate_prefix(bytes: &[u8]) -> core::result::Result<usize, ::wheels::DataLayoutError> {
                 if bytes.len() < #min_len {
@@ -514,9 +518,9 @@ impl ComptimeOptionalLen {
                 elem_size,
             } => {
                 let max_capacity = usize_lit(max_len_for_width(*len_width));
-                let width = usize_lit(*len_width);
-                let max = quote!(#width + #max_capacity * #elem_size);
-                (width, max)
+                let header_size = usize_lit(2 * len_width);
+                let max = quote!(#header_size + #max_capacity * #elem_size);
+                (header_size, max)
             }
             Self::Option { value_size } => (usize_lit(1), quote!(1usize + #value_size)),
             Self::NestedLayoutOption { ty } => (
@@ -722,8 +726,8 @@ impl FixedFieldKind {
                     return Ok(None);
                 };
                 let buffer_offset = buffer_offset.value().expect("fixed buffer_offset");
-                let len_width = capacity.len_width();
-                let first_elem_offset = offset + len_width;
+                let header_size = capacity.header_size();
+                let first_elem_offset = offset + header_size;
                 let misalignment = (buffer_offset + first_elem_offset) % align;
                 if misalignment == 0 {
                     return Ok(None);
@@ -735,10 +739,10 @@ impl FixedFieldKind {
                     error: syn::Error::new(
                         field_ident.span(),
                         format!(
-                        "field `{}` needs {} byte(s) of padding before it: its Vec elements start after a {}-byte length prefix, so element 0 would start at offset {}, but slice views require {}-byte alignment. Insert `_pad: [u8; {}]` before `{}` so element 0 starts at offset {}",
+                        "field `{}` needs {} byte(s) of padding before it: its Vec elements start after a {}-byte header, so element 0 would start at offset {}, but slice views require {}-byte alignment. Insert `_pad: [u8; {}]` before `{}` so element 0 starts at offset {}",
                         field_ident,
                         padding,
-                        len_width,
+                        header_size,
                         first_elem_offset,
                         align,
                         padding,
@@ -839,7 +843,8 @@ impl FixedFieldKind {
                 let len_width_lit = capacity.len_width_lit();
                 let elem_size = elem.size_expr();
                 let read_len = quote!(Self::__read_vec_len(bytes, #offset_expr, #len_width_lit)?);
-                let data_offset = quote!(#offset_expr + #len_width_lit);
+                let header_size = usize_lit(capacity.header_size());
+                let data_offset = quote!(#offset_expr + #header_size);
                 let end_expr = quote!(#data_offset + len * #elem_size);
                 let active_layout_validation = match elem {
                     FixedVecElementKind::FixedValue(_) => quote!(),
@@ -888,21 +893,13 @@ impl FixedFieldKind {
                         }
                     }
                     Capacity::Extendable { .. } => {
-                        let capacity_lit = capacity.max_capacity_lit();
                         quote! {
-                            let len = #read_len;
-                            let available = (bytes.len() - Self::MIN_DATA_LEN).checked_div(#elem_size)
-                                .ok_or(::wheels::DataLayoutError::InvalidDataLength)?;
-                            if len > #capacity_lit || len > available {
-                                ::pinocchio_log::log!(
-                                    "Invalid Vec length for field {}: capacity = {}, len = {}",
-                                    #field_name, core::cmp::min(#capacity_lit, available), len,
-                                );
-                                return Err(::wheels::DataLayoutError::LengthExceedsCapacity);
-                            }
+                            let (len, capacity) = ::wheels::layout::decode_extendable_vec_header(
+                                bytes, #offset_expr, #len_width_lit, #elem_size,
+                            )?;
                             #alignment_check
                             #active_layout_validation
-                            Ok(#end_expr)
+                            Ok(#data_offset + capacity * #elem_size)
                         }
                     }
                 }
@@ -1094,9 +1091,11 @@ impl FixedFieldKind {
                     };
                     quote! {
                         #fields_encode_expr
-                        let start = #offset + #len_width;
+                        let capacity_offset = #offset + #len_width;
+                        let start = capacity_offset + #len_width;
                         let count = (self.#field_ident.len() as u64).to_le_bytes();
-                        bytes[#offset..start].copy_from_slice(&count[..#len_width]);
+                        bytes[#offset..capacity_offset].copy_from_slice(&count[..#len_width]);
+                        bytes[capacity_offset..start].copy_from_slice(&count[..#len_width]);
                         #write_elements
                     }
                 }
@@ -1607,6 +1606,13 @@ impl Capacity {
                 }
             }
             Capacity::Extendable { len_width } => len_width,
+        }
+    }
+
+    fn header_size(self) -> usize {
+        match self {
+            Self::Fixed { .. } => self.len_width(),
+            Self::Extendable { len_width } => 2 * len_width,
         }
     }
 

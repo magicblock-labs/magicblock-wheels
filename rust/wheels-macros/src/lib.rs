@@ -59,11 +59,9 @@ mod variable_offset_layout;
 ///     macro emits `MIN_DATA_LEN` and `MAX_DATA_LEN` instead of `DATA_LEN`.
 ///     These layouts do not implement `FixedSizeLayout`.
 ///
-///     For a trailing extendable Vec, canonical `encode()` writes the count and
-///     active elements. `decode()` may also receive larger account/storage bytes
-///     and treats spare trailing bytes as Vec capacity. Generated getters return
-///     `ExtendableVec`, which exposes both active `len()` and storage
-///     `capacity()`.
+///     A trailing extendable Vec stores count, capacity, and then all reserved
+///     element slots. Canonical `encode()` sets capacity to the element count.
+///     Generated getters return `ExtendableVec`, which reads both headers.
 ///
 /// Attributes
 /// ==========
@@ -113,11 +111,10 @@ mod variable_offset_layout;
 ///   - `#[extendable = N]`
 ///
 ///     - Applicable only to the final field when that field is `Vec<T>`.
-///     - `N` must be `1..=8` and is the width, in bytes, of the encoded Vec
-///       length header.
+///     - `N` must be `1..=8`. The count and capacity each occupy `N` bytes.
 ///     - For `N = 8`, the supported Vec length is still capped at
 ///       `u32::MAX`.
-///     - The encoded length includes the count even for an empty vector.
+///     - An empty vector retains both headers.
 ///     - Generated immutable getters return `ExtendableVec`.
 ///     - Generated mutable views expose `<field>_mut()` returning `ExtendableVec`.
 ///
@@ -163,15 +160,16 @@ mod variable_offset_layout;
 ///
 /// Trait APIs:
 ///   - all layouts implement `Encodable`
-///   - all layouts implement `Decodable`; trailing extendable Vec layouts decode
-///     the supplied final storage region, so spare trailing Vec capacity is
-///     accepted and exposed by the generated view
+///   - all layouts implement `Decodable` for one complete record, including
+///     any reserved vector slots
 ///   - all layouts implement `PrefixDecodable` to read one record and return
 ///     its remainder. Constant-size layouts also implement `FixedSizeLayout`
 ///
 /// Methods:
 ///   - all layouts emit `decode_mut(storage: &impl LayoutStorageMut)`,
 ///     returning a view that holds the exclusive data borrow
+///   - layouts ending in an extendable vector also emit `decode_prefix_mut(storage)`
+///     to mutate the first record of a shared buffer and preserve subsequent bytes
 ///   - mutable views expose `<field>_mut()` helpers. A plain POD field returns
 ///     `&mut T` when its alignment is guaranteed. A copy-decoded integer such
 ///     as `u32` uses `LayoutCopyMut` with `buffer_offset = any` or when its

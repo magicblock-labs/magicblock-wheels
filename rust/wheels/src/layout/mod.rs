@@ -103,7 +103,7 @@
 //! | Flexible `Option<T>` | The final field may use `#[flexible]`; `None` writes `00` and `Some` writes `01` followed by the payload. | Not supported as a field attribute. Use normal tagged options, or `option = implicit` for eligible compatibility types. |
 //! | Implicit `Option<T>` | Not supported. | ⚠️ Backward compatibility only; avoid for new types. The struct-level `option = implicit` mode omits option tags and saves one byte per `Option<T>`, but is allowed only when there are no Vec fields and option presence can be inferred unambiguously from total encoded length. |
 //! | `Vec<T>` of supported scalar/key types | Uses `#[capacity = N]` to reserve space for `N` elements. Views expose active `len` and a `<field>_capacity()` method. | Uses `#[flexible = N]` to encode only active elements. Views return borrowed slices like `&[T]`. |
-//! | Extendable `Vec<T>` | Allowed only as the final field with `#[extendable = N]`, where `N` can be `1..=8`. Canonical `encode()` writes the count followed by the active elements. `decode()` may receive larger storage and exposes spare trailing bytes as [`ExtendableVec::capacity`]. | Not supported. Every Vec uses `#[flexible = N]` and models only active encoded elements. |
+//! | Extendable `Vec<T>` | Allowed only as the final field with `#[extendable = N]`, where `N` can be `1..=8`. Stores the count and capacity, followed by the reserved slots. Canonical `encode()` sets capacity to the count. | Not supported. Every Vec uses `#[flexible = N]` and models only active encoded elements. |
 //! | `Vec<T>` of user-defined layout types | Requires `T: FixedSizeLayout`; uses `#[capacity = N]` or final `#[extendable = N]`. Fixed-capacity getters return [`FixedLayoutSlice`]; final extendable getters return [`ExtendableVec`]. | Requires `#[element_size = fixed]` or `#[element_size = variable]`. Fixed elements return [`FixedLayoutSlice`]; variable elements return [`VariableLayoutSlice`]. |
 //! | `Option<T>` of a user-defined layout | Must be the final field. A normal option requires `T: FixedSizeLayout` and reserves a tag plus `T::DATA_LEN` bytes. With `#[flexible]`, `T: Encodable + PrefixDecodable + LayoutBounds` may have variable size. `None` occupies one tag byte and `Some` adds the encoded payload. | Requires `T: FixedSizeLayout`; uses tagged encoding and dynamically advances later field offsets. It is not supported with `option = implicit`. |
 //! | Mutation | `decode_mut(storage)` is generated for every fixed layout. Fixed-capacity Vec fields return [`FixedCapacityVec`] and can grow active `len` up to schema capacity without resizing storage. Final extendable Vec fields return [`ExtendableVec`] and may resize storage. | Not currently generated. |
@@ -118,7 +118,7 @@
 //! | `buffer_offset = any` | Struct-level; required alternative. | Struct-level; required alternative. | Use when the slice can start at any address. The decoder skips pointer-offset checking, and the macro rejects borrowed views that need alignment greater than 1. |
 //! | `option = implicit` | Not supported. | Struct-level; optional. | Backward-compatibility mode for structs without Vec fields. It omits option tags and infers option presence from the total encoded length. |
 //! | `#[capacity = N]` | Field-level; fixed-capacity `Vec<T>` only. | Not supported. | Reserves exactly `N` element slots in fixed-offset storage. The active Vec length may change up to that schema capacity without resizing storage. |
-//! | `#[extendable = N]` | Field-level; final `Vec<T>` only. | Not supported. | Uses an `N`-byte length header (`1..=8`) for a trailing Vec. `N` is length-header width, not capacity. Encoding writes the count even for an empty vector. Decoding a caller-framed storage region can expose spare capacity through [`ExtendableVec`]. |
+//! | `#[extendable = N]` | Field-level; final `Vec<T>` only. | Not supported. | Stores the count and capacity in two `N`-byte headers (`1..=8`). Both headers are present for an empty vector. |
 //! | `#[flexible]` | Field-level; final `Option<T>` only. | Not supported. | Stores a single `00` tag for `None` or `01` followed by the payload for `Some`. |
 //! | `#[flexible = N]` | Not supported; fixed trailing Vecs use `#[extendable = N]`. | Field-level; every `Vec<T>` field. | Uses an `N`-byte length header (`1..=8`) and encodes only active elements. `N` is length-header width, not capacity, and later field offsets are decoded dynamically. |
 //! | `#[element_size = fixed]` | Not supported. | Field-level; user-defined `Vec<T>` element types only. | Declares that each nested layout element has constant encoded width, so generated getters can return [`FixedLayoutSlice`]. |
@@ -131,10 +131,20 @@
 //! | `#[extendable = N]` | `#[flexible = N]` |
 //! |---|---|
 //! | Must be the **last field** of a fixed-offset struct. | Can appear **anywhere** in a variable-offset struct. |
-//! | To append, pass the record's own storage region to `decode_mut()`. A `push` reuses a spare slot or grows that storage. | To append, update the owned vector and re-encode the struct. |
+//! | Stores capacity in a second `N`-byte header. The next record starts after all `capacity` slots. | Stores only the count. The next field starts after `count` elements. |
+//! | A mutable view can append in place and grow storage when the reserved slots fill. | To append, update the owned vector and re-encode the struct. |
 //!
 //! For a flexible vector followed by another field, the layout is
 //! `[vec_field: [count][items]][next_field]`. The decoder uses the count to locate `next_field`.
+//!
+//! For an extendable vector in shared storage:
+//! `[vec_field: [count = 3][capacity = 8][3 items][5 spare slots]][next_record]`.
+//! Five pushes leave the next record at the same offset. The sixth grows storage
+//! and moves the following bytes once. The extra capacity header costs `N` bytes,
+//! and each spare slot occupies one encoded element. Use `decode_prefix()` to
+//! locate the next record and `decode_prefix_mut(storage)` to mutate the first.
+//! If later records require a specific `buffer_offset`, choose slot counts and
+//! growth steps that preserve their alignment when the records move.
 //!
 //! # Alignment Requirement
 //!
@@ -148,13 +158,13 @@
 //!
 //! A borrowed `T` must start at a multiple of `align_of::<T>()`. For every
 //! possible payload position, `payload_offset` counts all preceding bytes in
-//! the struct, including tags and length headers.
+//! the struct, including tags, counts, and capacity headers.
 //!
 //! `(buffer_offset + payload_offset) % align_of::<T>() == 0`
 //!
-//! - **Borrowing a slice.** With a one-byte tag and an eight-byte length header,
-//!   a struct starting at byte 1 puts the first `u16` at byte `1 + 1 + 8 = 10`
-//!   (even, aligned). Starting at byte 0 puts it at byte 9 (odd, misaligned).
+//! - **Borrowing a slice.** With a one-byte tag and two eight-byte vector headers,
+//!   a struct starting at byte 1 puts the first `u16` at byte `1 + 1 + 16 = 18`
+//!   (even, aligned). Starting at byte 0 puts it at byte 17 (odd, misaligned).
 //! - **Packing nested structs.** Two 39-byte entries starting at bytes 8 and 47
 //!   can both use `any` if their fields allow it. A child declaring
 //!   `buffer_offset = 0` can start at byte 8, but byte 47 fails its offset check.
@@ -205,9 +215,9 @@
 //! User-defined `Vec<T>` elements in `fixed_offset_layout` must be fixed-size
 //! layouts and do not use `#[element_size = ...]`.
 //! A final `#[extendable = N] Vec<T>` is the exception to fixed-size total
-//! storage. Canonical `encode()` stores the count and active elements. `decode()`
-//! can view an account/storage buffer with spare trailing bytes. The generated
-//! getter returns [`ExtendableVec`], which reports both `len()` and `capacity()`.
+//! storage. Canonical `encode()` writes equal count and capacity headers,
+//! followed by the active elements. The generated [`ExtendableVec`] getter
+//! reads both `len()` and `capacity()` from the record.
 //! For mutation, generated `decode_mut(storage)` works with
 //! [`LayoutStorageMut`] and exposes `<field>_mut()` helpers for scalar,
 //! option, and Vec fields.
@@ -255,6 +265,8 @@ mod storage;
 mod value_mut;
 mod variable_slice;
 
+#[doc(hidden)]
+pub use extendable_vec::decode_extendable_vec_header;
 pub use extendable_vec::{
     ExtendableVec, FixedLayoutElement, FixedLayoutExtendableVecIter, FixedValueElement,
 };
@@ -365,8 +377,8 @@ pub trait Decodable {
     type View<'a>;
 
     ///
-    /// Decodes one value from its storage region. For a trailing extendable
-    /// vector, the region may include spare whole-element slots.
+    /// Decodes one complete record, including any slots reserved by its capacity header.
+    /// Use [`PrefixDecodable::decode_prefix`] when the slice contains following records.
     ///
     fn decode<'a>(bytes: &'a [u8]) -> Result<Self::View<'a>, DataLayoutError>;
 }
@@ -383,20 +395,6 @@ pub trait PrefixDecodable {
     /// Decodes a prefix and returns the decoded view plus unconsumed bytes.
     ///
     fn decode_prefix<'a>(bytes: &'a [u8]) -> Result<(Self::View<'a>, &'a [u8]), DataLayoutError>;
-
-    /// Override point for [`Decodable::decode`], which delegates directly to this method.
-    /// Call `decode()` when the slice is one record's storage region. Call
-    /// [`Self::decode_prefix`] to read one record and return the remaining bytes.
-    ///
-    /// The default requires an exact fit. Layouts ending in an extendable vector
-    /// override this method to expose trailing whole-element slots as spare capacity.
-    fn decode_frame(bytes: &[u8]) -> Result<Self::View<'_>, DataLayoutError> {
-        let (view, remaining) = Self::decode_prefix(bytes)?;
-        if !remaining.is_empty() {
-            return Err(DataLayoutError::InvalidDataLength);
-        }
-        Ok(view)
-    }
 }
 
 impl<T> Decodable for T
@@ -406,7 +404,11 @@ where
     type View<'a> = <T as PrefixDecodable>::View<'a>;
 
     fn decode<'a>(bytes: &'a [u8]) -> Result<Self::View<'a>, DataLayoutError> {
-        T::decode_frame(bytes)
+        let (view, remaining) = T::decode_prefix(bytes)?;
+        if !remaining.is_empty() {
+            return Err(DataLayoutError::InvalidDataLength);
+        }
+        Ok(view)
     }
 }
 
