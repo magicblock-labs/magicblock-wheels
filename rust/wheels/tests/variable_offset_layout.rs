@@ -505,11 +505,8 @@ fn variable_layout_supports_prefix_layout_vec() {
     assert_eq!(second.payload(), &[]);
     assert!(entries.get(2).is_none());
 
-    let payload_lens = entries
-        .iter()
-        .map(|entry| entry.payload().len())
-        .collect::<Vec<_>>();
-    assert_eq!(payload_lens, vec![2, 0]);
+    let payloads: Vec<_> = entries.iter().map(|entry| entry.payload()).collect();
+    assert_eq!(payloads, [[9, 8].as_slice(), &[]]);
 }
 
 #[test]
