@@ -1407,7 +1407,7 @@ impl FixedFieldKind {
                     }
                     Capacity::Extendable { .. } => (
                         quote!(::wheels::layout::ExtendableVec<'_, #elem_ty, #guard, #marker>),
-                        quote!(::wheels::layout::ExtendableVec::new_storage(&mut self.borrowed, #offset, #len_width, #elem_size)),
+                        quote!(::wheels::layout::ExtendableVec::new_storage::<{ #elem_size }>(&mut self.borrowed, #offset, #len_width)),
                     ),
                 }
             }
