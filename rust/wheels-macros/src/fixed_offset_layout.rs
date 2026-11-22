@@ -72,6 +72,7 @@ pub(crate) fn expand_fixed_offset_layout(
     let mut view_methods = Vec::new();
     let mut view_mut_methods = Vec::new();
 
+    let mut schema_checks = Vec::new();
     let mut validate_steps = Vec::new();
     let mut layout_error: Option<syn::Error> = None;
     let mut trailing_variable_field = None;
@@ -84,6 +85,16 @@ pub(crate) fn expand_fixed_offset_layout(
         let layout = parse_field_layout(field, is_last_field)?;
 
         strip_field_attr(&mut field.attrs, FIELD_ATTRIBUTES);
+
+        if let FixedFieldKind::Vec {
+            elem,
+            capacity: Capacity::Extendable { .. },
+        } = &layout
+        {
+            let size = elem.size_expr();
+            let message = format!("field `{field_ident}` requires a nonzero encoded element size");
+            schema_checks.push(quote! { const _: () = assert!(#size > 0, #message); });
+        }
 
         match layout.check_ref_alignment(offset_value, args.buffer_offset, field_ident) {
             Ok(Some(issue)) => {
@@ -335,6 +346,7 @@ pub(crate) fn expand_fixed_offset_layout(
 
     Ok(quote! {
         #emitted_input
+        #(#schema_checks)*
 
         impl #struct_name {
             #datalen_vars
