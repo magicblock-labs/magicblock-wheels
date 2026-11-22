@@ -33,10 +33,10 @@ enum ExtendableVecSource<'a, S: ?Sized> {
 /// operations such as `push`, `extend_from_slice`, `pop`, `set`, `truncate`,
 /// and `clear`.
 ///
-/// An extendable Vec has no reserved bytes in canonical `encode()` output. When
-/// decoding account/storage bytes, however, the final field may include spare
-/// trailing storage. `len()` reports the active element count, while
-/// `capacity()` reports how many elements fit in the supplied backing storage.
+/// The field stores its count and capacity in two `N`-byte little-endian headers.
+/// Canonical `encode()` sets capacity to the count. A storage growth policy can
+/// reserve more slots. After reopening, `len()` counts active elements and
+/// `capacity()` counts all slots belonging to the field.
 ///
 /// CHECKPOINT(CU): generated fixed-layout getters pass compile-time constant
 /// offsets and element metadata into this generic helper. They are stored as
@@ -61,7 +61,7 @@ impl<'a, T> ExtendableVec<'a, T, (), FixedValueElement> {
         len_width: usize,
         elem_size: usize,
     ) -> Result<Self, DataLayoutError> {
-        let (len, capacity) = decode_storage_len(bytes, offset, len_width, elem_size)?;
+        let (len, capacity) = decode_extendable_vec_header(bytes, offset, len_width, elem_size)?;
         Ok(Self {
             source: ExtendableVecSource::Bytes(bytes),
             offset,
@@ -85,7 +85,7 @@ impl<'a, T> ExtendableVec<'a, T, (), FixedLayoutElement> {
     where
         T: FixedSizeLayout,
     {
-        let (len, capacity) = decode_storage_len(bytes, offset, len_width, elem_size)?;
+        let (len, capacity) = decode_extendable_vec_header(bytes, offset, len_width, elem_size)?;
         let vec = Self {
             source: ExtendableVecSource::Bytes(bytes),
             offset,
@@ -112,7 +112,7 @@ impl<'a, T, S: LayoutWriteGuard, K> ExtendableVec<'a, T, S, K> {
         len_width: usize,
         elem_size: usize,
     ) -> Self {
-        let (len, capacity) = decode_storage_len(storage, offset, len_width, elem_size)
+        let (len, capacity) = decode_extendable_vec_header(storage, offset, len_width, elem_size)
             .expect("validated extendable Vec");
         Self {
             source: ExtendableVecSource::Storage(storage),
@@ -145,15 +145,21 @@ impl<'a, T, S: ?Sized, K> ExtendableVec<'a, T, S, K> {
         self.len == 0
     }
 
-    /// Returns the active encoded length of this Vec field.
-    ///
-    /// Includes the length header even when the element count is zero.
+    /// Size of the compact encoding, including both headers and the active elements.
+    /// Use [`Self::storage_len`] for the field's size including spare slots.
     pub fn encoded_len(&self) -> usize {
-        self.len_width + self.len * self.elem_size
+        2 * self.len_width + self.len * self.elem_size
+    }
+
+    /// Bytes occupied by both headers and all reserved element slots.
+    /// With two 2-byte headers and four `u16` slots, this is `2 + 2 + 4 * 2 = 12`.
+    /// Clearing the vector keeps its capacity and storage length.
+    pub fn storage_len(&self) -> usize {
+        2 * self.len_width + self.capacity * self.elem_size
     }
 
     fn data_start(&self) -> usize {
-        self.offset + self.len_width
+        self.offset + 2 * self.len_width
     }
 
     fn active_range(&self) -> Range<usize> {
@@ -170,26 +176,12 @@ impl<'a, T, K> ExtendableVec<'a, T, (), K> {
         }
     }
 
-    /// Returns the trailing storage region for this Vec field.
-    ///
-    /// The returned bytes include the length header and all
-    /// spare trailing capacity supplied to `decode()`. They do not include the
-    /// fixed fields that come before the extendable Vec.
+    /// Returns both headers and all slots belonging to this field.
     pub fn storage_bytes(&self) -> &'a [u8] {
-        &self.all_bytes()[self.offset..]
+        &self.all_bytes()[self.offset..self.offset + self.storage_len()]
     }
 
-    /// Returns the byte count from the start of this field to the end of the buffer.
-    ///
-    /// This includes the length header and all occupied and spare
-    /// slots. With a two-byte header and four `u16` slots, [`capacity()`](Self::capacity)
-    /// is 4 and `storage_len()` is `2 + 4 * 2 = 10` bytes. An empty vector
-    /// with no spare slots uses only its two-byte header in this example.
-    pub fn storage_len(&self) -> usize {
-        self.storage_bytes().len()
-    }
-
-    /// Returns the active Vec payload bytes, without the length header.
+    /// Returns the active Vec payload bytes, excluding both headers.
     pub fn active_bytes(&self) -> &'a [u8] {
         &self.all_bytes()[self.active_range()]
     }
@@ -390,16 +382,6 @@ impl<'a, T, S, K> ExtendableVec<'a, T, S, K>
 where
     S: LayoutWriteGuard + ?Sized,
 {
-    /// Returns the byte count from the start of this field to the end of storage.
-    ///
-    /// This includes the length header and the bytes for every
-    /// occupied and spare slot. [`capacity()`](Self::capacity) counts elements.
-    /// [`clear()`](Self::clear) keeps the allocated slots and header, so an empty
-    /// vector can still have a nonzero storage length.
-    pub fn storage_len(&self) -> usize {
-        self.storage().len() - self.offset
-    }
-
     /// Shrinks the active logical length.
     pub fn truncate(&mut self, len: usize) -> Result<(), ProgramError> {
         if len > self.len {
@@ -434,26 +416,33 @@ where
     }
 
     fn ensure_capacity(&mut self, len: usize) -> Result<(), ProgramError> {
+        if len <= self.capacity {
+            return Ok(());
+        }
         let max_spare_elements = max_len(self.len_width)
             .checked_sub(len)
             .ok_or(DataLayoutError::LengthExceedsCapacity)?;
-
-        let needed_len = self
-            .offset
-            .checked_add(self.len_width)
-            .and_then(|value| value.checked_add(len.checked_mul(self.elem_size)?))
+        let elem_size = self.elem_size;
+        let old_len = self.storage().len();
+        let required = (len - self.capacity)
+            .checked_mul(elem_size)
+            .and_then(|extra| old_len.checked_add(extra))
             .ok_or(DataLayoutError::LengthExceedsCapacity)?;
+        let suffix_start = self.offset + self.storage_len();
+        let capacity_offset = self.offset + self.len_width;
+        let width = self.len_width;
+        let old_capacity = self.capacity;
+        let storage = self.storage_mut();
+        storage.grow(required, elem_size, max_spare_elements)?;
 
-        if needed_len > self.storage().len() {
-            let elem_size = self.elem_size;
-            self.storage_mut()
-                .grow(needed_len, elem_size, max_spare_elements)?;
-            self.capacity =
-                storage_capacity(self.storage().len(), self.offset, self.len_width, elem_size)?;
-            if self.capacity < len {
-                return Err(DataLayoutError::LengthExceedsCapacity.into());
-            }
+        let added = storage.len() - old_len;
+        let capacity = old_capacity + added / elem_size;
+        if suffix_start < old_len {
+            storage.copy_within(suffix_start..old_len, suffix_start + added);
+            storage[suffix_start..suffix_start + added].fill(0);
         }
+        write_len_header(storage, capacity_offset, width, capacity)?;
+        self.capacity = capacity;
         Ok(())
     }
 
@@ -485,47 +474,38 @@ where
     }
 }
 
-fn decode_storage_len(
+/// Reads the count and capacity of an extendable field and checks that all slots fit.
+#[doc(hidden)]
+pub fn decode_extendable_vec_header(
     bytes: &[u8],
     offset: usize,
     len_width: usize,
     elem_size: usize,
 ) -> Result<(usize, usize), DataLayoutError> {
-    if elem_size == 0 {
+    if !(1..=8).contains(&len_width) || elem_size == 0 {
         return Err(DataLayoutError::InvalidDataLength);
     }
-    let capacity = storage_capacity(bytes.len(), offset, len_width, elem_size)?;
-    let len = read_len_header(bytes, offset, len_width)?;
-    if len > capacity {
+    let (len_header, rest) = bytes
+        .get(offset..)
+        .and_then(|field| field.split_at_checked(len_width))
+        .ok_or(DataLayoutError::MissingLengthHeader)?;
+    let (capacity_header, payload) = rest
+        .split_at_checked(len_width)
+        .ok_or(DataLayoutError::MissingCapacityHeader)?;
+    let len = read_len_header(len_header)?;
+    let capacity = read_len_header(capacity_header)?;
+    if len > capacity || capacity > max_len(len_width) {
         return Err(DataLayoutError::LengthExceedsCapacity);
     }
-
+    if capacity > payload.len() / elem_size {
+        return Err(DataLayoutError::TruncatedVectorPayload);
+    }
     Ok((len, capacity))
 }
 
-fn storage_capacity(
-    storage_len: usize,
-    offset: usize,
-    len_width: usize,
-    elem_size: usize,
-) -> Result<usize, DataLayoutError> {
-    let available = storage_len
-        .checked_sub(offset + len_width)
-        .ok_or(DataLayoutError::MissingLengthHeader)?;
-    if !available.is_multiple_of(elem_size) {
-        return Err(DataLayoutError::InvalidDataLength);
-    }
-
-    Ok((available / elem_size).min(max_len(len_width)))
-}
-
-fn read_len_header(
-    bytes: &[u8],
-    offset: usize,
-    len_width: usize,
-) -> Result<usize, DataLayoutError> {
+fn read_len_header(bytes: &[u8]) -> Result<usize, DataLayoutError> {
     let mut raw = [0u8; 8];
-    raw[..len_width].copy_from_slice(&bytes[offset..offset + len_width]);
+    raw[..bytes.len()].copy_from_slice(bytes);
     let len = u64::from_le_bytes(raw);
     usize::try_from(len).map_err(|_| DataLayoutError::LengthExceedsCapacity)
 }

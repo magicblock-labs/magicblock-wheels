@@ -12,6 +12,7 @@ pub enum DataLayoutError {
     MissingLengthHeader = DataLayoutError::MIN + 8,
     TruncatedVectorPayload = DataLayoutError::MIN + 9,
     InvalidImplicitOptionEncoding = DataLayoutError::MIN + 10,
+    MissingCapacityHeader = DataLayoutError::MIN + 11,
 }
 
 impl DataLayoutError {
@@ -58,6 +59,7 @@ impl core::convert::TryFrom<u32> for DataLayoutError {
             x if x == Self::InvalidImplicitOptionEncoding as u32 => {
                 Ok(Self::InvalidImplicitOptionEncoding)
             }
+            x if x == Self::MissingCapacityHeader as u32 => Ok(Self::MissingCapacityHeader),
             _ => Err(()),
         }
     }
@@ -90,6 +92,7 @@ impl pinocchio::error::ToStr for DataLayoutError {
             Self::MissingLengthHeader => "Missing length header",
             Self::TruncatedVectorPayload => "Truncated vector payload",
             Self::InvalidImplicitOptionEncoding => "Invalid implicit option encoding",
+            Self::MissingCapacityHeader => "Missing capacity header",
         }
     }
 }
