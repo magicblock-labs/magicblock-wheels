@@ -1249,6 +1249,38 @@ fn fixed_offset_layout_mutates_fixed_capacity_fixed_layout_vec_storage() {
     assert_eq!(view.checksum(), 0xBEEF);
 }
 
+#[test]
+fn fixed_capacity_length_writes_cross_the_one_byte_boundary() {
+    #[fixed_offset_layout(buffer_offset = any)]
+    struct Record {
+        #[capacity = 255]
+        small: Vec<u8>,
+        #[capacity = 256]
+        large: Vec<u8>,
+    }
+
+    let record = Record {
+        small: vec![0; 254],
+        large: vec![0; 255],
+    };
+    let storage = TestStorage::new(record.encode().unwrap());
+    let mut view = Record::decode_mut(&storage).unwrap();
+    let full = ProgramError::from(DataLayoutError::LengthExceedsCapacity);
+    let mut small = view.small_mut();
+    small.push(7).unwrap();
+    assert_eq!(small.push(9).unwrap_err(), full);
+    let mut large = view.large_mut();
+    large.push(8).unwrap();
+    assert_eq!(large.push(9).unwrap_err(), full);
+
+    let [small, large] = Record::OFFSETS;
+    assert_eq!(view.bytes()[small], 255);
+    assert_eq!(&view.bytes()[large..large + 2], &[0, 1]);
+    let decoded = Record::decode(view.bytes()).unwrap();
+    assert_eq!(decoded.small()[254], 7);
+    assert_eq!(decoded.large()[255], 8);
+}
+
 #[fixed_offset_layout(buffer_offset = any)]
 struct FixedTrailingEntryVecArgs {
     tag: u8,

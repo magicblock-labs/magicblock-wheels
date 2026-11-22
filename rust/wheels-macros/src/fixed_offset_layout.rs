@@ -1402,7 +1402,7 @@ impl FixedFieldKind {
                         let max = capacity.max_capacity_lit();
                         (
                             quote!(::wheels::layout::FixedCapacityVec<'_, #elem_ty, #marker>),
-                            quote!(::wheels::layout::FixedCapacityVec::new(&mut self.borrowed, #offset, #len_width, #elem_size, #max)),
+                            quote!(::wheels::layout::FixedCapacityVec::new::<#max, #len_width>(&mut self.borrowed, #offset, #elem_size)),
                         )
                     }
                     Capacity::Extendable { .. } => (

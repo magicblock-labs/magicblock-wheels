@@ -3,9 +3,7 @@ use core::marker::PhantomData;
 use bytemuck::Pod;
 use pinocchio::error::ProgramError;
 
-use super::{
-    Encodable, FixedLayoutElement, FixedSizeLayout, FixedValueElement, MAX_SUPPORTED_VEC_LEN,
-};
+use super::{Encodable, FixedLayoutElement, FixedSizeLayout, FixedValueElement};
 use crate::DataLayoutError;
 
 /// Mutable storage-backed view over a fixed-capacity `Vec<T>` slot.
@@ -32,21 +30,32 @@ pub struct FixedCapacityVec<'a, T, K = FixedValueElement> {
 
 impl<'a, T, K> FixedCapacityVec<'a, T, K> {
     #[doc(hidden)]
-    pub fn new(
+    pub fn new<const CAPACITY: usize, const LEN_WIDTH: usize>(
         bytes: &'a mut [u8],
         offset: usize,
-        len_width: usize,
         elem_size: usize,
-        capacity: usize,
     ) -> Self {
-        let len = read_len_header(bytes, offset, len_width).expect("validated Vec length");
+        const {
+            assert!(
+                match LEN_WIDTH {
+                    1 => CAPACITY <= u8::MAX as usize,
+                    2 => CAPACITY <= u16::MAX as usize,
+                    _ => false,
+                },
+                "fixed Vec capacity must fit its length header"
+            )
+        };
+        let mut header = [0; 2];
+        header[..LEN_WIDTH].copy_from_slice(&bytes[offset..offset + LEN_WIDTH]);
+        let len = usize::from(u16::from_le_bytes(header));
+        assert!(len <= CAPACITY, "invalid fixed Vec length");
         Self {
             bytes,
             offset,
-            len_width,
+            len_width: LEN_WIDTH,
             elem_size,
             len,
-            capacity,
+            capacity: CAPACITY,
             _marker: PhantomData,
         }
     }
@@ -107,8 +116,7 @@ where
 
         let index = self.len;
         self.write_bytes_at(index, bytemuck::bytes_of(&value));
-        self.write_len(next_len)?;
-        self.len = next_len;
+        self.write_len(next_len);
         Ok(())
     }
 
@@ -120,8 +128,7 @@ where
 
         let index = self.len - 1;
         let value = self.get(index).expect("validated Vec length");
-        self.write_len(index)?;
-        self.len = index;
+        self.write_len(index);
         Ok(Some(value))
     }
 
@@ -152,8 +159,7 @@ where
 
         let index = self.len;
         self.write_encoded_at(index, value)?;
-        self.write_len(next_len)?;
-        self.len = next_len;
+        self.write_len(next_len);
         Ok(())
     }
 
@@ -164,8 +170,7 @@ where
         }
 
         let next_len = self.len - 1;
-        self.write_len(next_len)?;
-        self.len = next_len;
+        self.write_len(next_len);
         Ok(())
     }
 
@@ -189,8 +194,7 @@ impl<'a, T, K> FixedCapacityVec<'a, T, K> {
             return Ok(());
         }
 
-        self.write_len(len)?;
-        self.len = len;
+        self.write_len(len);
         Ok(())
     }
 
@@ -199,12 +203,12 @@ impl<'a, T, K> FixedCapacityVec<'a, T, K> {
         self.truncate(0)
     }
 
-    fn write_len(&mut self, len: usize) -> Result<(), ProgramError> {
-        if len > self.capacity || len > max_len(self.len_width) {
-            return Err(DataLayoutError::LengthExceedsCapacity.into());
-        }
-
-        write_len_header(self.bytes, self.offset, self.len_width, len)
+    // Push checks capacity. Pop and truncate only decrease the validated length.
+    fn write_len(&mut self, len: usize) {
+        let raw = len.to_le_bytes();
+        self.bytes[self.offset..self.offset + self.len_width]
+            .copy_from_slice(&raw[..self.len_width]);
+        self.len = len;
     }
 
     fn write_bytes_at(&mut self, index: usize, value: &[u8]) {
@@ -224,35 +228,5 @@ impl<'a, T, K> FixedCapacityVec<'a, T, K> {
             return Err(DataLayoutError::InvalidDataLength.into());
         }
         Ok(())
-    }
-}
-
-fn read_len_header(bytes: &[u8], offset: usize, len_width: usize) -> Result<usize, ProgramError> {
-    let mut raw = [0u8; 8];
-    raw[..len_width].copy_from_slice(&bytes[offset..offset + len_width]);
-    let len = u64::from_le_bytes(raw);
-    usize::try_from(len).map_err(|_| DataLayoutError::LengthExceedsCapacity.into())
-}
-
-fn write_len_header(
-    bytes: &mut [u8],
-    offset: usize,
-    len_width: usize,
-    len: usize,
-) -> Result<(), ProgramError> {
-    if len > max_len(len_width) {
-        return Err(DataLayoutError::LengthExceedsCapacity.into());
-    }
-
-    let raw = (len as u64).to_le_bytes();
-    bytes[offset..offset + len_width].copy_from_slice(&raw[..len_width]);
-    Ok(())
-}
-
-fn max_len(len_width: usize) -> usize {
-    match len_width {
-        0 => 0,
-        1..=7 => (1usize << (len_width * 8)) - 1,
-        _ => MAX_SUPPORTED_VEC_LEN,
     }
 }
