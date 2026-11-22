@@ -259,7 +259,7 @@ fn packed_nested_entries_round_trip() {
     assert_eq!(entries.get(1).unwrap().header(), second.header);
 }
 
-#[fixed_offset_layout(buffer_offset = 0)]
+#[fixed_offset_layout(buffer_offset = any)]
 struct FlexibleNestedOptionArgs {
     header: u8,
     #[flexible]
@@ -452,7 +452,7 @@ fn cap_only_wrapper_preserves_inner_growth_step() {
     assert_eq!(storage.resize_lens(), [17]);
 }
 
-#[fixed_offset_layout(buffer_offset = 0)]
+#[fixed_offset_layout(buffer_offset = any)]
 struct FlexibleVariableNestedOptionArgs {
     header: u8,
     #[flexible]
@@ -871,7 +871,7 @@ impl FixedEntry {
     }
 }
 
-#[fixed_offset_layout(buffer_offset = 0)]
+#[fixed_offset_layout(buffer_offset = any)]
 struct FixedEntryVecArgs {
     tag: u8,
     #[capacity = 3]
@@ -976,7 +976,7 @@ fn fixed_offset_layout_mutates_fixed_capacity_fixed_layout_vec_storage() {
     assert_eq!(view.checksum(), 0xBEEF);
 }
 
-#[fixed_offset_layout(buffer_offset = 0)]
+#[fixed_offset_layout(buffer_offset = any)]
 struct FixedTrailingEntryVecArgs {
     tag: u8,
     #[extendable = 1]
