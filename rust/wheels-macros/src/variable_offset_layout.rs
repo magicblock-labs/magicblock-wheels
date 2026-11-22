@@ -1354,7 +1354,7 @@ impl FieldLayout {
                 let offset_expr = find_data_offset(struct_name, field_offsets);
                 match elem {
                     VecElementKind::FixedValue(_) => Ok(quote! {
-                        pub fn #field_ident(&self) -> &[#elem_ty] {
+                        pub fn #field_ident(&self) -> &'a [#elem_ty] {
                             let offset = #offset_expr;
                             let len = #len_expr;
                             if len == 0 {
