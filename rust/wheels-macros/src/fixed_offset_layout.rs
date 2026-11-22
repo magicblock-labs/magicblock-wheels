@@ -165,12 +165,20 @@ pub(crate) fn expand_fixed_offset_layout(
     let has_trailing_variable_field = trailing_variable_field.is_some();
     let (short_header_check, decode_prefix_mut) = match &trailing_variable_field {
         Some((_, ComptimeOptionalLen::ArrayLen { len_width, .. })) => (
-            quote! {
-                if bytes.len() >= #datalen_expr + #len_width {
-                    return Err(::wheels::DataLayoutError::MissingCapacityHeader);
-                }
-                if bytes.get(..#datalen_expr).is_some() {
-                    return Err(::wheels::DataLayoutError::MissingLengthHeader);
+            {
+                // Clippy prefers `len > offset` to `len >= offset + 1` for a one-byte header.
+                let has_length_header = if *len_width == 1 {
+                    quote!(bytes.len() > #datalen_expr)
+                } else {
+                    quote!(bytes.len() >= #datalen_expr + #len_width)
+                };
+                quote! {
+                    if #has_length_header {
+                        return Err(::wheels::DataLayoutError::MissingCapacityHeader);
+                    }
+                    if bytes.len() >= #datalen_expr {
+                        return Err(::wheels::DataLayoutError::MissingLengthHeader);
+                    }
                 }
             },
             quote! {
