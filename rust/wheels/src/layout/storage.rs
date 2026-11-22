@@ -29,15 +29,48 @@ pub trait LayoutStorage {
 /// mutate in place; trailing variable-length fields may also resize the backing
 /// data.
 pub trait LayoutStorageMut: LayoutStorage {
-    type RefMut<'a>: DerefMut<Target = [u8]>
+    type RefMut<'a>: LayoutWriteGuard
     where
         Self: 'a;
 
-    /// Borrows the backing data buffer mutably.
+    /// Acquires the guard held by `decode_mut()`. Custom storage implements
+    /// [`LayoutWriteGuard`] on this guard to handle resizing during a borrow.
     fn borrow_data_mut(&self) -> Result<Self::RefMut<'_>, ProgramError>;
 
     /// Resizes the backing data buffer.
-    fn resize(&self, new_len: usize) -> Result<(), ProgramError>;
+    fn resize(&self, new_len: usize) -> Result<(), ProgramError> {
+        self.borrow_data_mut()?.resize(new_len)
+    }
+}
+
+/// Exclusive access to the bytes held by a mutable layout view.
+pub trait LayoutWriteGuard: DerefMut<Target = [u8]> {
+    /// Resizes to the exact length and preserves the common prefix. If the
+    /// buffer moves, its address modulo eight must stay the same so a decoded
+    /// layout can keep using its aligned fields. On error the original bytes
+    /// and length must remain accessible through this guard.
+    fn resize(&mut self, new_len: usize) -> Result<(), ProgramError>;
+
+    /// Returns the preferred total length in bytes, taking growth steps and
+    /// caps into account. A cap may produce a length below `requested_len`.
+    /// Override this to apply a growth policy through nested storage wrappers.
+    fn preferred_growth_len(&self, requested_len: usize) -> usize {
+        requested_len
+    }
+
+    /// Called when a vector needs more storage. `min_len` is the required
+    /// total buffer length. Extra capacity must consist of whole elements.
+    /// Growth has the same alignment and error guarantees as [`Self::resize`].
+    fn grow(&mut self, min_len: usize, element_size: usize) -> Result<(), ProgramError> {
+        let target = self.preferred_growth_len(min_len);
+        let spare = target
+            .checked_sub(min_len)
+            .ok_or(DataLayoutError::LengthExceedsCapacity)?;
+        let remainder = spare
+            .checked_rem(element_size)
+            .ok_or(DataLayoutError::InvalidDataLength)?;
+        self.resize(target - remainder)
+    }
 }
 
 impl LayoutStorage for pinocchio::account::AccountView {
@@ -57,12 +90,15 @@ impl LayoutStorage for pinocchio::account::AccountView {
 
 impl LayoutStorageMut for pinocchio::account::AccountView {
     type RefMut<'a>
-        = pinocchio::account::RefMut<'a, [u8]>
+        = AccountWriteGuard<'a>
     where
         Self: 'a;
 
     fn borrow_data_mut(&self) -> Result<Self::RefMut<'_>, ProgramError> {
-        self.try_borrow_mut()
+        Ok(AccountWriteGuard {
+            account: self,
+            borrowed: Some(self.try_borrow_mut()?),
+        })
     }
 
     fn resize(&self, new_len: usize) -> Result<(), ProgramError> {
@@ -70,12 +106,57 @@ impl LayoutStorageMut for pinocchio::account::AccountView {
     }
 }
 
+/// Exclusive account data borrow used by a mutable layout view.
+pub struct AccountWriteGuard<'a> {
+    account: &'a pinocchio::account::AccountView,
+    borrowed: Option<pinocchio::account::RefMut<'a, [u8]>>,
+}
+
+impl Deref for AccountWriteGuard<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        self.borrowed.as_deref().expect("account data is borrowed")
+    }
+}
+
+impl DerefMut for AccountWriteGuard<'_> {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        self.borrowed
+            .as_deref_mut()
+            .expect("account data is borrowed")
+    }
+}
+
+impl LayoutWriteGuard for AccountWriteGuard<'_> {
+    fn resize(&mut self, new_len: usize) -> Result<(), ProgramError> {
+        if new_len == self.len() {
+            return Ok(());
+        }
+
+        // AccountView requires an unborrowed account to resize. Its synchronous
+        // resize runs no user code, so we can immediately reclaim our exclusive
+        // borrow at the current length, even when the runtime rejected growth.
+        drop(self.borrowed.take());
+        let result = self.account.resize(new_len);
+        self.borrowed = Some(
+            self.account
+                .try_borrow_mut()
+                .expect("exclusive account access"),
+        );
+        result
+    }
+}
+
 /// Growth-capping wrapper for mutable layout storage.
 ///
-/// Generated mutable views ask storage to resize to the exact byte length they
-/// currently need. Wrapping account-like storage in `MaxLenStorage` keeps that
-/// exact behavior for shrinking, but grows in additive steps so repeated
-/// trailing Vec pushes do not need to realloc on every element.
+/// A trailing Vec grows in additive steps, with spare bytes rounded down to
+/// whole elements. Flexible options and shrink operations use the exact
+/// requested length.
+///
+/// One wrapper can set both the cap and the growth step. A helper that receives
+/// already-wrapped storage can add its own cap with a zero step. Nested
+/// wrappers use the smallest cap and the largest step.
 pub struct MaxLenStorage<'a, Storage: ?Sized> {
     storage: &'a Storage,
     max_data_len: usize,
@@ -85,9 +166,8 @@ pub struct MaxLenStorage<'a, Storage: ?Sized> {
 impl<'a, Storage: ?Sized> MaxLenStorage<'a, Storage> {
     /// Creates a wrapper around `storage`.
     ///
-    /// `max_len` is an inclusive cap on the absolute backing storage length in
-    /// bytes. `step` controls extra growth beyond the requested length. A step
-    /// of zero preserves exact growth while still enforcing `max_len`.
+    /// `max_data_len` caps the total buffer length in bytes. On growth,
+    /// `resize_step` requests that many bytes beyond the current length.
     pub const fn new(storage: &'a Storage, max_data_len: usize, resize_step: usize) -> Self {
         Self {
             storage,
@@ -135,27 +215,61 @@ where
     Storage: LayoutStorageMut + ?Sized,
 {
     type RefMut<'a>
-        = Storage::RefMut<'a>
+        = MaxLenWriteGuard<Storage::RefMut<'a>>
     where
         Self: 'a;
 
     fn borrow_data_mut(&self) -> Result<Self::RefMut<'_>, ProgramError> {
-        self.storage.borrow_data_mut()
+        Ok(MaxLenWriteGuard {
+            borrowed: self.storage.borrow_data_mut()?,
+            max_data_len: self.max_data_len,
+            resize_step: self.resize_step,
+        })
     }
 
-    fn resize(&self, requested_len: usize) -> Result<(), ProgramError> {
-        let current_len = self.storage.data_len();
-        if requested_len <= current_len {
-            // Shrinks exactly; step growth only applies when storage grows.
-            return self.storage.resize(requested_len);
+    fn resize(&self, new_len: usize) -> Result<(), ProgramError> {
+        let mut bytes = self.borrow_data_mut()?;
+        if new_len > bytes.len() {
+            bytes.grow(new_len, 1)
+        } else {
+            bytes.resize(new_len)
         }
+    }
+}
 
-        if requested_len > self.max_data_len {
+/// Exclusive byte access with the growth policy of [`MaxLenStorage`].
+pub struct MaxLenWriteGuard<G> {
+    borrowed: G,
+    max_data_len: usize,
+    resize_step: usize,
+}
+
+impl<G: LayoutWriteGuard> Deref for MaxLenWriteGuard<G> {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.borrowed
+    }
+}
+
+impl<G: LayoutWriteGuard> DerefMut for MaxLenWriteGuard<G> {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.borrowed
+    }
+}
+
+impl<G: LayoutWriteGuard> LayoutWriteGuard for MaxLenWriteGuard<G> {
+    fn resize(&mut self, new_len: usize) -> Result<(), ProgramError> {
+        if new_len > self.len() && new_len > self.max_data_len {
             return Err(DataLayoutError::LengthExceedsCapacity.into());
         }
+        self.borrowed.resize(new_len)
+    }
 
-        let stepped_len = current_len.saturating_add(self.resize_step);
-        let new_len = requested_len.max(stepped_len).min(self.max_data_len);
-        self.storage.resize(new_len)
+    fn preferred_growth_len(&self, requested_len: usize) -> usize {
+        let stepped = self.len().saturating_add(self.resize_step);
+        self.borrowed
+            .preferred_growth_len(requested_len.max(stepped))
+            .min(self.max_data_len)
     }
 }

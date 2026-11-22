@@ -170,9 +170,9 @@ mod variable_offset_layout;
 ///
 /// Methods:
 ///   - all layouts emit `decode_mut(storage: &impl LayoutStorageMut)`,
-///     returning a mutable storage-backed view
+///     returning a view that holds the exclusive data borrow
 ///   - mutable views expose `<field>_mut()` helpers. Plain aligned POD fields
-///     return a mutable guard, encoded bool/Option fields return slot helpers,
+///     return `&mut T`, encoded bool/Option fields return slot helpers,
 ///     user-defined nested-layout options return `FixedLayoutOptionMut` or
 ///     `FlexibleLayoutOptionMut`,
 ///     fixed-capacity Vec fields return `FixedCapacityVec`, and trailing

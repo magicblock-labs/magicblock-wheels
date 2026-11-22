@@ -3,7 +3,7 @@ use core::{marker::PhantomData, ops::Range};
 use bytemuck::Pod;
 use pinocchio::error::ProgramError;
 
-use super::{Encodable, FixedSizeLayout, LayoutStorageMut, MAX_SUPPORTED_VEC_LEN};
+use super::{Encodable, FixedSizeLayout, LayoutWriteGuard, MAX_SUPPORTED_VEC_LEN};
 use crate::DataLayoutError;
 
 /// Marker for extendable Vec elements that are fixed-value/POD layout fields.
@@ -20,7 +20,7 @@ pub enum FixedLayoutElement {}
 
 enum ExtendableVecSource<'a, S: ?Sized> {
     Bytes(&'a [u8]),
-    Storage(&'a S),
+    Storage(&'a mut S),
 }
 
 /// View over a trailing `#[extendable = N] Vec<T>` in `fixed_offset_layout`.
@@ -29,7 +29,7 @@ enum ExtendableVecSource<'a, S: ?Sized> {
 /// getters return `ExtendableVec` for a trailing extendable Vec so the view can
 /// expose both the active logical length and the storage capacity represented
 /// by the backing bytes. Generated mutable getters from `decode_mut()` return
-/// the same type backed by [`LayoutStorageMut`], which enables Vec-like
+/// the same type backed by [`LayoutWriteGuard`], which enables Vec-like
 /// operations such as `push`, `extend_from_slice`, `pop`, `set`, `truncate`,
 /// and `clear`.
 ///
@@ -104,23 +104,17 @@ impl<'a, T> ExtendableVec<'a, T, (), FixedLayoutElement> {
     }
 }
 
-impl<'a, T, S> ExtendableVec<'a, T, S, FixedValueElement>
-where
-    S: LayoutStorageMut + ?Sized,
-{
+impl<'a, T, S: LayoutWriteGuard, K> ExtendableVec<'a, T, S, K> {
     #[doc(hidden)]
-    pub fn new_fixed_value_storage(
-        storage: &'a S,
+    pub fn new_storage(
+        storage: &'a mut S,
         offset: usize,
         len_width: usize,
         elem_size: usize,
-    ) -> Result<Self, ProgramError> {
-        let bytes = storage.borrow_data()?;
-        let (len, capacity) =
-            decode_storage_len(&bytes, offset, len_width, elem_size).map_err(ProgramError::from)?;
-        drop(bytes);
-
-        Ok(Self {
+    ) -> Self {
+        let (len, capacity) = decode_storage_len(storage, offset, len_width, elem_size)
+            .expect("validated extendable Vec");
+        Self {
             source: ExtendableVecSource::Storage(storage),
             offset,
             len_width,
@@ -128,46 +122,7 @@ where
             len,
             capacity,
             _marker: PhantomData,
-        })
-    }
-}
-
-impl<'a, T, S> ExtendableVec<'a, T, S, FixedLayoutElement>
-where
-    S: LayoutStorageMut + ?Sized,
-{
-    #[doc(hidden)]
-    pub fn new_fixed_layout_storage(
-        storage: &'a S,
-        offset: usize,
-        len_width: usize,
-        elem_size: usize,
-    ) -> Result<Self, ProgramError>
-    where
-        T: FixedSizeLayout,
-    {
-        let bytes = storage.borrow_data()?;
-        let (len, capacity) =
-            decode_storage_len(&bytes, offset, len_width, elem_size).map_err(ProgramError::from)?;
-
-        if len != 0 {
-            let data_start = offset + len_width;
-            let active_end = data_start + len * elem_size;
-            for chunk in bytes[data_start..active_end].chunks_exact(T::DATA_LEN) {
-                T::decode(chunk).map_err(ProgramError::from)?;
-            }
         }
-        drop(bytes);
-
-        Ok(Self {
-            source: ExtendableVecSource::Storage(storage),
-            offset,
-            len_width,
-            elem_size,
-            len,
-            capacity,
-            _marker: PhantomData,
-        })
     }
 }
 
@@ -311,7 +266,7 @@ where
 impl<'a, T, S> ExtendableVec<'a, T, S, FixedValueElement>
 where
     T: Pod,
-    S: LayoutStorageMut + ?Sized,
+    S: LayoutWriteGuard + ?Sized,
 {
     /// Appends one fixed-value element, growing the backing storage when needed.
     pub fn push(&mut self, value: T) -> Result<(), ProgramError> {
@@ -322,10 +277,9 @@ where
         self.ensure_capacity(next_len)?;
 
         let index = self.len;
-        self.write_bytes_at(index, bytemuck::bytes_of(&value))?;
+        self.write_bytes_at(index, bytemuck::bytes_of(&value));
         self.write_len(next_len)?;
         self.len = next_len;
-        self.refresh_capacity();
         Ok(())
     }
 
@@ -361,14 +315,10 @@ where
         let end = start
             .checked_add(byte_len)
             .ok_or(DataLayoutError::LengthExceedsCapacity)?;
-        {
-            let mut bytes = self.storage()?.borrow_data_mut()?;
-            bytes[start..end].copy_from_slice(value_bytes);
-        }
+        self.storage_mut()[start..end].copy_from_slice(value_bytes);
 
         self.write_len(next_len)?;
         self.len = next_len;
-        self.refresh_capacity();
         Ok(())
     }
 
@@ -380,7 +330,7 @@ where
 
         let index = self.len - 1;
         let value = {
-            let bytes = self.storage()?.borrow_data()?;
+            let bytes = self.storage();
             let start = self.data_start() + index * self.elem_size;
             bytemuck::pod_read_unaligned(&bytes[start..start + self.elem_size])
         };
@@ -395,14 +345,15 @@ where
             return Err(DataLayoutError::InvalidDataLength.into());
         }
 
-        self.write_bytes_at(index, bytemuck::bytes_of(&value))
+        self.write_bytes_at(index, bytemuck::bytes_of(&value));
+        Ok(())
     }
 }
 
 impl<'a, T, S> ExtendableVec<'a, T, S, FixedLayoutElement>
 where
     T: Encodable + FixedSizeLayout,
-    S: LayoutStorageMut + ?Sized,
+    S: LayoutWriteGuard + ?Sized,
 {
     /// Appends one fixed-size layout element, growing the backing storage when needed.
     pub fn push(&mut self, value: &T) -> Result<(), ProgramError> {
@@ -416,7 +367,6 @@ where
         self.write_encoded_at(index, value)?;
         self.write_len(next_len)?;
         self.len = next_len;
-        self.refresh_capacity();
         Ok(())
     }
 
@@ -444,7 +394,7 @@ where
 
 impl<'a, T, S, K> ExtendableVec<'a, T, S, K>
 where
-    S: LayoutStorageMut + ?Sized,
+    S: LayoutWriteGuard + ?Sized,
 {
     /// Returns the byte count from the start of this field to the end of storage.
     ///
@@ -453,9 +403,7 @@ where
     /// [`clear()`](Self::clear) keeps the allocated slots and header, so an empty
     /// vector can still have a nonzero storage length.
     pub fn storage_len(&self) -> usize {
-        self.storage()
-            .map(|storage| storage.data_len().saturating_sub(self.offset))
-            .unwrap_or(0)
+        self.storage().len() - self.offset
     }
 
     /// Shrinks the active logical length.
@@ -477,10 +425,17 @@ where
         self.truncate(0)
     }
 
-    fn storage(&self) -> Result<&'a S, ProgramError> {
-        match self.source {
-            ExtendableVecSource::Storage(storage) => Ok(storage),
-            ExtendableVecSource::Bytes(_) => Err(DataLayoutError::InvalidDataLength.into()),
+    fn storage(&self) -> &S {
+        match &self.source {
+            ExtendableVecSource::Storage(storage) => storage,
+            ExtendableVecSource::Bytes(_) => unreachable!(),
+        }
+    }
+
+    fn storage_mut(&mut self) -> &mut S {
+        match &mut self.source {
+            ExtendableVecSource::Storage(storage) => storage,
+            ExtendableVecSource::Bytes(_) => unreachable!(),
         }
     }
 
@@ -495,59 +450,38 @@ where
             .and_then(|value| value.checked_add(len.checked_mul(self.elem_size)?))
             .ok_or(DataLayoutError::LengthExceedsCapacity)?;
 
-        let storage = self.storage()?;
-        if needed_len > storage.data_len() {
-            storage.resize(needed_len)?;
-        }
-
-        self.refresh_capacity();
-        if len > self.capacity {
-            return Err(DataLayoutError::LengthExceedsCapacity.into());
+        if needed_len > self.storage().len() {
+            let elem_size = self.elem_size;
+            self.storage_mut().grow(needed_len, elem_size)?;
+            self.capacity =
+                storage_capacity(self.storage().len(), self.offset, self.len_width, elem_size)?;
+            if self.capacity < len {
+                return Err(DataLayoutError::LengthExceedsCapacity.into());
+            }
         }
         Ok(())
     }
 
-    fn refresh_capacity(&mut self) {
-        if let Ok(storage) = self.storage() {
-            self.capacity = storage_capacity(
-                storage.data_len(),
-                self.offset,
-                self.len_width,
-                self.elem_size,
-            )
-            .unwrap_or(self.capacity);
-        }
+    fn write_len(&mut self, len: usize) -> Result<(), ProgramError> {
+        let offset = self.offset;
+        let len_width = self.len_width;
+        write_len_header(self.storage_mut(), offset, len_width, len).map_err(ProgramError::from)
     }
 
-    fn write_len(&self, len: usize) -> Result<(), ProgramError> {
-        if len > max_len(self.len_width) {
-            return Err(DataLayoutError::LengthExceedsCapacity.into());
-        }
-
-        let storage = self.storage()?;
-        if storage.data_len() < self.offset + self.len_width {
-            storage.resize(self.offset + self.len_width)?;
-        }
-
-        let mut bytes = storage.borrow_data_mut()?;
-        write_len_header(&mut bytes, self.offset, self.len_width, len).map_err(ProgramError::from)
-    }
-
-    fn write_bytes_at(&self, index: usize, value: &[u8]) -> Result<(), ProgramError> {
+    fn write_bytes_at(&mut self, index: usize, value: &[u8]) {
         let start = self.data_start() + index * self.elem_size;
         let end = start + self.elem_size;
-        let mut bytes = self.storage()?.borrow_data_mut()?;
+        let bytes = self.storage_mut();
         bytes[start..end].copy_from_slice(value);
-        Ok(())
     }
 
-    fn write_encoded_at(&self, index: usize, value: &T) -> Result<(), ProgramError>
+    fn write_encoded_at(&mut self, index: usize, value: &T) -> Result<(), ProgramError>
     where
         T: Encodable,
     {
         let start = self.data_start() + index * self.elem_size;
         let end = start + self.elem_size;
-        let mut bytes = self.storage()?.borrow_data_mut()?;
+        let bytes = self.storage_mut();
         let remaining = value.encode_to(&mut bytes[start..end])?;
         if !remaining.is_empty() {
             return Err(DataLayoutError::InvalidDataLength.into());

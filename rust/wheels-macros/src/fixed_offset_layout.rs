@@ -117,7 +117,7 @@ pub(crate) fn expand_fixed_offset_layout(
             offset_value,
             args.buffer_offset,
             field_ident,
-        )?);
+        ));
 
         fields_encode_expr =
             layout.gen_field_encode(fields_encode_expr, offset_expr.clone(), field_ident);
@@ -310,23 +310,27 @@ pub(crate) fn expand_fixed_offset_layout(
         where
             S: ::wheels::layout::LayoutStorageMut + ?Sized,
         {
-            let bytes = storage.borrow_data()?;
-            Self::__validate_bytes(&bytes)
+            let borrowed = storage.borrow_data_mut()?;
+            Self::__validate_bytes(&borrowed)
                 .map_err(::pinocchio::error::ProgramError::from)?;
-            drop(bytes);
 
-            Ok(#view_mut_name { storage })
+            Ok(#view_mut_name { borrowed })
         }
     };
     let view_mut_bounds = where_bounds.iter();
     let view_mut_type = quote! {
         #[allow(dead_code)]
-        #[derive(Debug)]
         pub struct #view_mut_name<'a, S>
         where
-            S: ::wheels::layout::LayoutStorageMut + ?Sized,
+            S: ::wheels::layout::LayoutStorageMut + ?Sized + 'a,
         {
-            storage: &'a S,
+            borrowed: S::RefMut<'a>,
+        }
+
+        impl<'a, S: ::wheels::layout::LayoutStorageMut + ?Sized> core::fmt::Debug for #view_mut_name<'a, S> {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.debug_struct(stringify!(#view_mut_name)).field("storage_len", &self.borrowed.len()).finish()
+            }
         }
 
         impl<'a, S> #view_mut_name<'a, S>
@@ -334,8 +338,13 @@ pub(crate) fn expand_fixed_offset_layout(
             S: ::wheels::layout::LayoutStorageMut + ?Sized,
             #(#view_mut_bounds,)*
         {
+            /// Reads the backing bytes through the borrow held by this view.
+            pub fn bytes(&self) -> &[u8] {
+                &self.borrowed
+            }
+
             pub fn storage_len(&self) -> usize {
-                self.storage.data_len()
+                self.borrowed.len()
             }
 
             #(#view_mut_methods)*
@@ -458,6 +467,9 @@ pub(crate) fn expand_fixed_offset_layout(
                 elem_size: usize,
                 field_name: &'static str,
             ) -> core::result::Result<(), ::wheels::DataLayoutError> {
+                if elem_size == 0 {
+                    return Err(::wheels::DataLayoutError::InvalidDataLength);
+                }
                 if bytes.len() == offset {
                     return Ok(());
                 }
@@ -621,20 +633,6 @@ impl FixedVecElementKind {
         match self {
             Self::FixedValue(_) => quote!(::wheels::layout::FixedValueElement),
             Self::FixedSizeLayout { .. } => quote!(::wheels::layout::FixedLayoutElement),
-        }
-    }
-
-    fn extendable_new_storage_fn(&self) -> Ident {
-        match self {
-            Self::FixedValue(_) => format_ident!("new_fixed_value_storage"),
-            Self::FixedSizeLayout { .. } => format_ident!("new_fixed_layout_storage"),
-        }
-    }
-
-    fn fixed_capacity_new_storage_fn(&self) -> Ident {
-        match self {
-            Self::FixedValue(_) => format_ident!("new_fixed_value_storage"),
-            Self::FixedSizeLayout { .. } => format_ident!("new_fixed_layout_storage"),
         }
     }
 }
@@ -1425,197 +1423,105 @@ impl FixedFieldKind {
         offset_value: Option<usize>,
         buffer_offset: BufferOffset,
         field_ident: &Ident,
-    ) -> syn::Result<proc_macro2::TokenStream> {
+    ) -> proc_macro2::TokenStream {
         let offset = quote!((#offset));
         let field_mut_ident = format_ident!("{}_mut", field_ident);
 
-        match self {
+        let guard = quote!(S::RefMut<'a>);
+        let flexible_slot =
+            quote!(::wheels::layout::FlexibleOptionBytes::new(&mut self.borrowed, #offset));
+        let (handle, field) = match self {
             Self::Value {
                 value,
                 optional: None,
             } => {
+                let ty = value.ty();
+                let size = usize_lit(value.size());
+                let slot = quote!(&mut self.borrowed[#offset..#offset + #size]);
                 if matches!(value, FixedValueKind::Bool { .. }) {
-                    Ok(quote! {
-                        pub fn #field_mut_ident(
-                            &mut self,
-                        ) -> core::result::Result<
-                            ::wheels::layout::LayoutBoolMut<'a, S>,
-                            ::pinocchio::error::ProgramError,
-                        > {
-                            ::wheels::layout::LayoutBoolMut::new(self.storage, #offset)
-                        }
-                    })
+                    (
+                        quote!(::wheels::layout::LayoutBoolMut<'_>),
+                        quote!(::wheels::layout::LayoutBoolMut::new(&mut self.borrowed[#offset])),
+                    )
+                } else if can_mut_borrow_value(value, offset_value, buffer_offset) {
+                    (quote!(&mut #ty), quote!(::bytemuck::from_bytes_mut(#slot)))
                 } else {
-                    let ty = value.ty();
-                    if can_mut_borrow_value(value, offset_value, buffer_offset) {
-                        Ok(quote! {
-                            pub fn #field_mut_ident(
-                                &mut self,
-                            ) -> core::result::Result<
-                                ::wheels::layout::LayoutValueMut<'a, S, #ty>,
-                                ::pinocchio::error::ProgramError,
-                            > {
-                                ::wheels::layout::LayoutValueMut::new(self.storage, #offset)
-                            }
-                        })
-                    } else {
-                        Ok(quote! {
-                            pub fn #field_mut_ident(
-                                &mut self,
-                            ) -> core::result::Result<
-                                ::wheels::layout::LayoutCopyMut<'a, S, #ty>,
-                                ::pinocchio::error::ProgramError,
-                            > {
-                                ::wheels::layout::LayoutCopyMut::new(self.storage, #offset)
-                            }
-                        })
-                    }
+                    (
+                        quote!(::wheels::layout::LayoutCopyMut<'_, #ty>),
+                        quote!(::wheels::layout::LayoutCopyMut::new(#slot)),
+                    )
                 }
             }
             Self::Value {
                 value,
-                optional: Some(Optional::Fixed),
+                optional: Some(optional),
             } => {
-                if matches!(value, FixedValueKind::Bool { .. }) {
-                    Ok(quote! {
-                        pub fn #field_mut_ident(
-                            &mut self,
-                        ) -> core::result::Result<
-                            ::wheels::layout::LayoutBoolOptionMut<'a, S>,
-                            ::pinocchio::error::ProgramError,
-                        > {
-                            ::wheels::layout::LayoutBoolOptionMut::new_fixed(
-                                self.storage,
-                                #offset,
-                            )
-                        }
-                    })
-                } else {
-                    let ty = value.ty();
-                    Ok(quote! {
-                        pub fn #field_mut_ident(
-                            &mut self,
-                        ) -> core::result::Result<
-                            ::wheels::layout::LayoutOptionMut<'a, S, #ty>,
-                            ::pinocchio::error::ProgramError,
-                        > {
-                            ::wheels::layout::LayoutOptionMut::new_fixed(
-                                self.storage,
-                                #offset,
-                            )
-                        }
-                    })
-                }
-            }
-            Self::Value {
-                value,
-                optional: Some(Optional::Flexible),
-            } => {
-                if matches!(value, FixedValueKind::Bool { .. }) {
-                    Ok(quote! {
-                        pub fn #field_mut_ident(
-                            &mut self,
-                        ) -> core::result::Result<
-                            ::wheels::layout::LayoutBoolOptionMut<'a, S>,
-                            ::pinocchio::error::ProgramError,
-                        > {
-                            ::wheels::layout::LayoutBoolOptionMut::new_flexible(
-                                self.storage,
-                                #offset,
-                            )
-                        }
-                    })
-                } else {
-                    let ty = value.ty();
-                    Ok(quote! {
-                        pub fn #field_mut_ident(
-                            &mut self,
-                        ) -> core::result::Result<
-                            ::wheels::layout::LayoutOptionMut<'a, S, #ty>,
-                            ::pinocchio::error::ProgramError,
-                        > {
-                            ::wheels::layout::LayoutOptionMut::new_flexible(
-                                self.storage,
-                                #offset,
-                            )
-                        }
-                    })
-                }
-            }
-            Self::NestedLayoutOption { ty, optional } => match optional {
-                Optional::Fixed => Ok(quote! {
-                    pub fn #field_mut_ident(
-                        &mut self,
-                    ) -> core::result::Result<
-                        ::wheels::layout::FixedLayoutOptionMut<'a, S, #ty>,
-                        ::pinocchio::error::ProgramError,
-                    > {
-                        ::wheels::layout::FixedLayoutOptionMut::new(
-                            self.storage,
-                            #offset,
+                let (slot_ty, slot) = match optional {
+                    Optional::Fixed => {
+                        let size = usize_lit(1 + value.size());
+                        (
+                            quote!(&mut [u8]),
+                            quote!(&mut self.borrowed[#offset..#offset + #size]),
                         )
                     }
-                }),
-                Optional::Flexible => Ok(quote! {
-                    pub fn #field_mut_ident(
-                        &mut self,
-                    ) -> core::result::Result<
-                        ::wheels::layout::FlexibleLayoutOptionMut<'a, S, #ty>,
-                        ::pinocchio::error::ProgramError,
-                    > {
-                        ::wheels::layout::FlexibleLayoutOptionMut::new(
-                            self.storage,
-                            #offset,
-                        )
-                    }
-                }),
-            },
+                    Optional::Flexible => (
+                        quote!(::wheels::layout::FlexibleOptionBytes<'_, #guard>),
+                        flexible_slot,
+                    ),
+                };
+                if matches!(value, FixedValueKind::Bool { .. }) {
+                    (
+                        quote!(::wheels::layout::LayoutBoolOptionMut<#slot_ty>),
+                        quote!(::wheels::layout::LayoutBoolOptionMut::new(#slot)),
+                    )
+                } else {
+                    let ty = value.ty();
+                    (
+                        quote!(::wheels::layout::LayoutOptionMut<#slot_ty, #ty>),
+                        quote!(::wheels::layout::LayoutOptionMut::new(#slot)),
+                    )
+                }
+            }
+            Self::NestedLayoutOption {
+                ty,
+                optional: Optional::Fixed,
+            } => {
+                let size = quote!(1 + <#ty as ::wheels::layout::FixedSizeLayout>::DATA_LEN);
+                (
+                    quote!(::wheels::layout::FixedLayoutOptionMut<'_, #ty>),
+                    quote!(::wheels::layout::FixedLayoutOptionMut::new(&mut self.borrowed[#offset..#offset + #size])),
+                )
+            }
+            Self::NestedLayoutOption {
+                ty,
+                optional: Optional::Flexible,
+            } => (
+                quote!(::wheels::layout::FlexibleLayoutOptionMut<'_, #guard, #ty>),
+                quote!(::wheels::layout::FlexibleLayoutOptionMut::new(#flexible_slot)),
+            ),
             Self::Vec { elem, capacity } => {
                 let elem_ty = elem.ty();
                 let elem_size = elem.size_expr();
                 let marker = elem.extendable_marker();
-                let len_width_lit = capacity.len_width_lit();
-
+                let len_width = capacity.len_width_lit();
                 match capacity {
                     Capacity::Fixed { .. } => {
-                        let capacity_lit = capacity.max_capacity_lit();
-                        let new_storage_fn = elem.fixed_capacity_new_storage_fn();
-                        Ok(quote! {
-                            pub fn #field_mut_ident(
-                                &mut self,
-                            ) -> core::result::Result<
-                                ::wheels::layout::FixedCapacityVec<'a, #elem_ty, S, #marker>,
-                                ::pinocchio::error::ProgramError,
-                            > {
-                                ::wheels::layout::FixedCapacityVec::#new_storage_fn(
-                                    self.storage,
-                                    #offset,
-                                    #len_width_lit,
-                                    #elem_size,
-                                    #capacity_lit,
-                                )
-                            }
-                        })
+                        let max = capacity.max_capacity_lit();
+                        (
+                            quote!(::wheels::layout::FixedCapacityVec<'_, #elem_ty, #marker>),
+                            quote!(::wheels::layout::FixedCapacityVec::new(&mut self.borrowed, #offset, #len_width, #elem_size, #max)),
+                        )
                     }
-                    Capacity::Extendable { .. } => {
-                        let new_storage_fn = elem.extendable_new_storage_fn();
-                        Ok(quote! {
-                            pub fn #field_mut_ident(
-                                &mut self,
-                            ) -> core::result::Result<
-                                ::wheels::layout::ExtendableVec<'a, #elem_ty, S, #marker>,
-                                ::pinocchio::error::ProgramError,
-                            > {
-                                ::wheels::layout::ExtendableVec::#new_storage_fn(
-                                    self.storage,
-                                    #offset,
-                                    #len_width_lit,
-                                    #elem_size,
-                                )
-                            }
-                        })
-                    }
+                    Capacity::Extendable { .. } => (
+                        quote!(::wheels::layout::ExtendableVec<'_, #elem_ty, #guard, #marker>),
+                        quote!(::wheels::layout::ExtendableVec::new_storage(&mut self.borrowed, #offset, #len_width, #elem_size)),
+                    ),
                 }
+            }
+        };
+        quote! {
+            pub fn #field_mut_ident(&mut self) -> #handle {
+                #field
             }
         }
     }

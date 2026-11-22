@@ -1,13 +1,17 @@
 extern crate alloc;
 
-use std::cell::{Ref, RefCell, RefMut};
+use std::{
+    cell::{Ref, RefCell, RefMut},
+    ops::{Deref, DerefMut},
+};
 
 use pinocchio::error::ProgramError;
 use pinocchio::Address;
 use wheels::{
     fixed_offset_layout,
     layout::{
-        Decodable, Encodable, LayoutStorage, LayoutStorageMut, MaxLenStorage, PrefixDecodable,
+        Decodable, Encodable, LayoutStorage, LayoutStorageMut, LayoutWriteGuard, MaxLenStorage,
+        PrefixDecodable,
     },
     DataLayoutError, Pubkey,
 };
@@ -56,23 +60,53 @@ impl LayoutStorage for TestStorage {
     }
 
     fn borrow_data(&self) -> Result<Self::Ref<'_>, ProgramError> {
-        Ok(Ref::map(self.bytes.borrow(), Vec::as_slice))
+        let bytes = self
+            .bytes
+            .try_borrow()
+            .map_err(|_| ProgramError::AccountBorrowFailed)?;
+        Ok(Ref::map(bytes, Vec::as_slice))
     }
 }
 
 impl LayoutStorageMut for TestStorage {
     type RefMut<'a>
-        = RefMut<'a, [u8]>
+        = TestWriteGuard<'a>
     where
         Self: 'a;
 
     fn borrow_data_mut(&self) -> Result<Self::RefMut<'_>, ProgramError> {
-        Ok(RefMut::map(self.bytes.borrow_mut(), Vec::as_mut_slice))
+        Ok(TestWriteGuard {
+            borrowed: self
+                .bytes
+                .try_borrow_mut()
+                .map_err(|_| ProgramError::AccountBorrowFailed)?,
+            resize_lens: &self.resize_lens,
+        })
     }
+}
 
-    fn resize(&self, new_len: usize) -> Result<(), ProgramError> {
+struct TestWriteGuard<'a> {
+    borrowed: RefMut<'a, Vec<u8>>,
+    resize_lens: &'a RefCell<Vec<usize>>,
+}
+
+impl Deref for TestWriteGuard<'_> {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.borrowed
+    }
+}
+
+impl DerefMut for TestWriteGuard<'_> {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.borrowed
+    }
+}
+
+impl LayoutWriteGuard for TestWriteGuard<'_> {
+    fn resize(&mut self, new_len: usize) -> Result<(), ProgramError> {
         self.resize_lens.borrow_mut().push(new_len);
-        self.bytes.borrow_mut().resize(new_len, 0);
+        self.borrowed.resize(new_len, 0);
         Ok(())
     }
 }
@@ -121,16 +155,27 @@ fn account_config_round_trips_and_mutates_scalar_fields() {
     assert_eq!(view.sponsored(), Some(false));
 
     let storage = TestStorage::new(encoded);
+    let reader = storage.borrow_data().unwrap();
+    assert_eq!(
+        AccountConfig::decode_mut(&storage).unwrap_err(),
+        ProgramError::AccountBorrowFailed
+    );
+    drop(reader);
     let mut view = AccountConfig::decode_mut(&storage).unwrap();
-    let mut enabled = view.enabled_mut().unwrap();
-    assert!(enabled.get().unwrap());
-    enabled.set(false).unwrap();
-    *view.authority_mut().unwrap() = Address::from([6; 32]);
-    let mut sponsored = view.sponsored_mut().unwrap();
-    assert_eq!(sponsored.get().unwrap(), Some(false));
-    sponsored.set(None).unwrap();
-    assert_eq!(sponsored.get().unwrap(), None);
-    sponsored.set(Some(true)).unwrap();
+    assert_eq!(
+        storage.borrow_data().unwrap_err(),
+        ProgramError::AccountBorrowFailed
+    );
+    let mut enabled = view.enabled_mut();
+    assert!(enabled.get());
+    enabled.set(false);
+    *view.authority_mut() = Address::from([6; 32]);
+    let mut sponsored = view.sponsored_mut();
+    assert_eq!(sponsored.get(), Some(false));
+    sponsored.set(None);
+    assert_eq!(sponsored.get(), None);
+    sponsored.set(Some(true));
+    drop(view);
 
     let bytes = storage.bytes();
     let view = AccountConfig::decode(&bytes).unwrap();
@@ -139,7 +184,7 @@ fn account_config_round_trips_and_mutates_scalar_fields() {
     assert_eq!(view.sponsored(), Some(true));
 }
 
-#[fixed_offset_layout(buffer_offset = 0)]
+#[fixed_offset_layout(buffer_offset = unknown)]
 struct FixedNestedOptionArgs {
     header: u8,
     config: Option<AccountConfig>,
@@ -182,6 +227,39 @@ fn fixed_offset_layout_supports_fixed_nested_option() {
 }
 
 #[fixed_offset_layout(buffer_offset = 0)]
+struct FixedNestedOptionVecArgs {
+    _padding: [u8; 7],
+    #[capacity = 2]
+    entries: Vec<FixedNestedOptionArgs>,
+}
+
+#[test]
+fn packed_nested_entries_round_trip() {
+    assert_eq!(FixedNestedOptionVecArgs::DATA_LEN, 86);
+    let storage = TestStorage::new(vec![0; FixedNestedOptionVecArgs::DATA_LEN]);
+    let mut view = FixedNestedOptionVecArgs::decode_mut(&storage).unwrap();
+    let mut entries = view.entries_mut();
+    let first = FixedNestedOptionArgs {
+        header: 11,
+        config: None,
+    };
+    let second = FixedNestedOptionArgs {
+        header: 22,
+        config: None,
+    };
+
+    // The first entry starts at byte 8. Its 39-byte width puts the second at byte 47.
+    entries.push(&first).unwrap();
+    entries.push(&second).unwrap();
+
+    let decoded = FixedNestedOptionVecArgs::decode(view.bytes()).unwrap();
+    let entries = decoded.entries();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.get(0).unwrap().header(), first.header);
+    assert_eq!(entries.get(1).unwrap().header(), second.header);
+}
+
+#[fixed_offset_layout(buffer_offset = 0)]
 struct FlexibleNestedOptionArgs {
     header: u8,
     #[flexible]
@@ -208,7 +286,8 @@ fn flexible_option_round_trips_a_fixed_size_child() {
         enabled: true,
     };
     let mut view = FlexibleNestedOptionArgs::decode_mut(&storage).unwrap();
-    view.config_mut().unwrap().set(Some(&config)).unwrap();
+    view.config_mut().set(Some(&config)).unwrap();
+    drop(view);
 
     let bytes = storage.bytes();
     assert_eq!(bytes.len(), FlexibleNestedOptionArgs::MAX_DATA_LEN);
@@ -231,12 +310,14 @@ fn flexible_pubkey_round_trips_after_set_and_clear() {
     assert_eq!(FlexiblePubkeyArgs::MAX_DATA_LEN, 34);
 
     let storage = TestStorage::new(vec![7]);
+    let capped = MaxLenStorage::new(&storage, 64, 64);
+    let mut view = FlexiblePubkeyArgs::decode_mut(&capped).unwrap();
     for key in [Some(Pubkey::from([4; 32])), None] {
-        let mut view = FlexiblePubkeyArgs::decode_mut(&storage).unwrap();
-        view.key_mut().unwrap().set(key).unwrap();
+        let mut slot = view.key_mut();
+        slot.set(key).unwrap();
+        assert_eq!(slot.get(), key);
 
-        let bytes = storage.borrow_data().unwrap();
-        let decoded = FlexiblePubkeyArgs::decode(&bytes).unwrap();
+        let decoded = FlexiblePubkeyArgs::decode(view.bytes()).unwrap();
         assert_eq!(decoded.header(), 7);
         assert_eq!(decoded.key(), key.as_ref());
     }
@@ -254,6 +335,12 @@ fn flexible_pubkey_rejects_invalid_tag_and_truncated_key() {
             FlexiblePubkeyArgs::decode(&bytes[..2 + key_bytes]).unwrap_err(),
             expected
         );
+        let storage = TestStorage::new(bytes[..2 + key_bytes].to_vec());
+        assert_eq!(
+            FlexiblePubkeyArgs::decode_mut(&storage).unwrap_err(),
+            ProgramError::from(expected)
+        );
+        assert!(storage.borrow_data_mut().is_ok());
     }
 }
 
@@ -277,7 +364,7 @@ fn byte_payload_extends_by_slices_up_to_the_length_header_limit() {
     }
     let storage = TestStorage::new(vec![7]);
     let mut view = BytePayload::decode_mut(&storage).unwrap();
-    let mut payload = view.payload_mut().unwrap();
+    let mut payload = view.payload_mut();
 
     payload.extend_from_slice(&[]).unwrap();
     assert_eq!((payload.len(), payload.capacity()), (0, 0));
@@ -285,16 +372,19 @@ fn byte_payload_extends_by_slices_up_to_the_length_header_limit() {
     payload.extend_from_slice(&values[..2]).unwrap();
     payload.extend_from_slice(&values[2..4]).unwrap();
     assert_eq!((payload.len(), payload.capacity()), (4, 4));
-    assert_eq!(storage.bytes(), [7, 4, 0, 1, 2, 3]);
     assert_eq!(payload.storage_len(), 5);
+    assert_eq!(view.bytes(), [7, 4, 0, 1, 2, 3]);
+    let mut payload = view.payload_mut();
 
     payload.extend_from_slice(&values[4..]).unwrap();
-    let full = storage.bytes();
+    let full = view.bytes().to_vec();
+    let mut payload = view.payload_mut();
     assert_eq!(
         payload.extend_from_slice(&[255]).unwrap_err(),
         ProgramError::from(DataLayoutError::LengthExceedsCapacity)
     );
     assert_eq!((payload.len(), payload.capacity()), (255, 255));
+    drop(view);
     assert_eq!(storage.bytes(), full);
     let decoded = BytePayload::decode(&full).unwrap().payload();
     assert_eq!(decoded.as_slice(), values);
@@ -306,7 +396,7 @@ fn max_len_storage_grows_extendable_vec_in_steps_up_to_its_limit() {
     let storage = TestStorage::new(vec![7]);
     let max_len_storage = MaxLenStorage::new(&storage, 9, 4);
     let mut view = BytePayload::decode_mut(&max_len_storage).unwrap();
-    let mut payload = view.payload_mut().unwrap();
+    let mut payload = view.payload_mut();
 
     assert_eq!(
         payload.extend_from_slice(&[0; 8]).unwrap_err(),
@@ -314,22 +404,52 @@ fn max_len_storage_grows_extendable_vec_in_steps_up_to_its_limit() {
     );
     assert_eq!((payload.len(), payload.capacity()), (0, 0));
     assert!(storage.resize_lens().is_empty());
-    assert_eq!(storage.bytes(), [7]);
+    assert_eq!(view.bytes(), [7]);
 
+    let mut payload = view.payload_mut();
     payload.extend_from_slice(&[1, 2]).unwrap();
     assert_eq!(payload.capacity(), 3);
-    assert_eq!(storage.bytes(), [7, 2, 1, 2, 0]);
+    assert_eq!(view.bytes(), [7, 2, 1, 2, 0]);
+    let mut payload = view.payload_mut();
     payload.push(3).unwrap();
     assert_eq!(storage.resize_lens(), [5]);
     payload.push(4).unwrap();
     assert_eq!(payload.storage_len(), 8);
     assert_eq!(storage.resize_lens(), [5, 9]);
+    drop(view);
 
     let bytes = storage.bytes();
     assert_eq!(bytes, [7, 4, 1, 2, 3, 4, 0, 0, 0]);
     let view = BytePayload::decode(&bytes).unwrap();
     assert_eq!(view.payload().as_slice(), &[1, 2, 3, 4]);
     assert_eq!(view.payload().capacity(), 7);
+}
+
+#[test]
+fn cap_only_wrapper_preserves_inner_growth_step() {
+    let storage = TestStorage::new(vec![7]);
+
+    // One `MaxLenStorage` is enough to set both the 64-byte cap and the 16-byte
+    // growth step.
+    //
+    // This test adds a second wrapper with the same cap and a zero step to
+    // verify that it preserves the inner step. The first push grows the buffer
+    // from 1 to 17 bytes, and the second reuses that space.
+    let inner = MaxLenStorage::new(&storage, 64, 16);
+    let outer = MaxLenStorage::new(&inner, 64, 0);
+
+    let mut view = BytePayload::decode_mut(&outer).unwrap();
+    let mut payload = view.payload_mut();
+
+    assert_eq!(payload.capacity(), 0);
+    payload.push(1).unwrap();
+    assert_eq!(payload.capacity(), 15);
+    payload.push(2).unwrap();
+    assert_eq!(payload.capacity(), 15);
+
+    let decoded = BytePayload::decode(view.bytes()).unwrap();
+    assert_eq!(decoded.payload().as_slice(), &[1, 2]);
+    assert_eq!(storage.resize_lens(), [17]);
 }
 
 #[fixed_offset_layout(buffer_offset = 0)]
@@ -358,7 +478,7 @@ fn fixed_offset_layout_supports_flexible_variable_nested_option() {
     };
     {
         let mut view = FlexibleVariableNestedOptionArgs::decode_mut(&storage).unwrap();
-        view.config_mut().unwrap().set(Some(&config)).unwrap();
+        view.config_mut().set(Some(&config)).unwrap();
     }
 
     assert_eq!(
@@ -387,13 +507,13 @@ fn fixed_offset_layout_supports_flexible_variable_nested_option() {
     };
     {
         let mut view = FlexibleVariableNestedOptionArgs::decode_mut(&storage).unwrap();
-        view.config_mut().unwrap().set(Some(&shorter)).unwrap();
+        view.config_mut().set(Some(&shorter)).unwrap();
     }
     assert_eq!(storage.bytes(), vec![7, 1, 4, 1, 5]);
 
     {
         let mut view = FlexibleVariableNestedOptionArgs::decode_mut(&storage).unwrap();
-        view.config_mut().unwrap().set(None).unwrap();
+        view.config_mut().set(None).unwrap();
     }
     assert_eq!(storage.bytes(), vec![7]);
     assert_eq!(storage.resize_lens(), vec![7, 5, 1]);
@@ -494,20 +614,20 @@ fn fixed_offset_layout_mutates_fixed_fields_and_fixed_capacity_vec() {
     let mut view = PrivateTransferFixedArgs::decode_mut(&storage).unwrap();
     assert_eq!(view.storage_len(), PrivateTransferFixedArgs::DATA_LEN);
 
-    *view.shuttle_id_mut().unwrap() = 101;
-    *view.checksum_mut().unwrap() = 0xCAFE;
-    let mut amount = view.amount_mut().unwrap();
-    assert_eq!(amount.get().unwrap(), 200);
-    amount.set(202).unwrap();
-    let mut validator = view.validator_mut().unwrap();
-    assert_eq!(validator.get().unwrap(), Some([1; 32]));
-    validator.set(None).unwrap();
-    assert_eq!(validator.get().unwrap(), None);
-    validator.set(Some([3; 32])).unwrap();
+    *view.shuttle_id_mut() = 101;
+    *view.checksum_mut() = 0xCAFE;
+    let mut amount = view.amount_mut();
+    assert_eq!(amount.get(), 200);
+    amount.set(202);
+    let mut validator = view.validator_mut();
+    assert_eq!(validator.get(), Some([1; 32]));
+    validator.set(None);
+    assert_eq!(validator.get(), None);
+    validator.set(Some([3; 32]));
 
-    let mut recipients = view.recipients_mut().unwrap();
+    let mut recipients = view.recipients_mut();
     assert_eq!((recipients.len(), recipients.capacity()), (1, 2));
-    assert_eq!(recipients.get(0).unwrap(), Some(Address::from([1; 32])));
+    assert_eq!(recipients.get(0), Some(Address::from([1; 32])));
     recipients.push(Address::from([2; 32])).unwrap();
     assert_eq!(
         recipients.push(Address::from([3; 32])).unwrap_err(),
@@ -518,6 +638,7 @@ fn fixed_offset_layout_mutates_fixed_fields_and_fixed_capacity_vec() {
     recipients.set(0, Address::from([2; 32])).unwrap();
     recipients.truncate(1).unwrap();
     recipients.push(Address::from([4; 32])).unwrap();
+    drop(view);
 
     let bytes = storage.bytes();
     assert_eq!(bytes.len(), PrivateTransferFixedArgs::DATA_LEN);
@@ -600,26 +721,99 @@ fn fixed_offset_layout_mutates_trailing_extendable_vec_storage() {
     }
 
     let storage = TestStorage::new(empty);
-    let mut view = FixedTrailingVecArgs::decode_mut(&storage).unwrap();
-    let mut tail = view.tail_mut().unwrap();
+    // A seven-byte step from six bytes leaves room for two whole u16s after the header.
+    let capped = MaxLenStorage::new(&storage, 13, 7);
+    let mut view = FixedTrailingVecArgs::decode_mut(&capped).unwrap();
+    let mut tail = view.tail_mut();
     assert_eq!((tail.len(), tail.capacity()), (0, 0));
     tail.extend_from_slice(&[0x0102, 0x0304]).unwrap();
     assert_eq!((tail.len(), tail.capacity()), (2, 2));
-    assert_eq!(storage.bytes(), [7, 2, 1, 2, 0, 0, 2, 0, 2, 1, 4, 3]);
+    assert_eq!(view.bytes(), [7, 2, 1, 2, 0, 0, 2, 0, 2, 1, 4, 3]);
+    let mut tail = view.tail_mut();
 
     tail.set(1, 0x0506).unwrap();
     assert_eq!(tail.pop().unwrap(), Some(0x0506));
     tail.push(0x0708).unwrap();
-    let bytes = storage.bytes();
-    let aligned = aligned_copy::<12>(&bytes);
-    let view = FixedTrailingVecArgs::decode(&aligned.0).unwrap();
-    assert_eq!(view.tail().as_slice(), &[0x0102, 0x0708]);
+    let decoded = FixedTrailingVecArgs::decode(view.bytes()).unwrap();
+    assert_eq!(decoded.tail().as_slice(), &[0x0102, 0x0708]);
 
-    tail.clear().unwrap();
+    view.tail_mut().clear().unwrap();
+    drop(view);
     let bytes = storage.bytes();
     let aligned = aligned_copy::<12>(&bytes);
     let view = FixedTrailingVecArgs::decode(&aligned.0[..bytes.len()]).unwrap();
     assert_eq!((view.tail().len(), view.tail().capacity()), (0, 2));
+}
+
+#[test]
+fn nested_storage_caps_limit_growth_to_whole_elements() {
+    for (inner_cap, inner_step, outer_cap, outer_step) in [(64, 16, 13, 0), (13, 0, 64, 16)] {
+        let storage = TestStorage::new(vec![0; FixedTrailingVecArgs::MIN_DATA_LEN]);
+        let inner = MaxLenStorage::new(&storage, inner_cap, inner_step);
+        let outer = MaxLenStorage::new(&inner, outer_cap, outer_step);
+        let mut view = FixedTrailingVecArgs::decode_mut(&outer).unwrap();
+        let mut tail = view.tail_mut();
+
+        // The u16 payload starts at byte 8. A 13-byte cap fits two elements.
+        tail.push(1).unwrap();
+        tail.push(2).unwrap();
+        assert_eq!(
+            tail.push(3).unwrap_err(),
+            ProgramError::from(DataLayoutError::LengthExceedsCapacity)
+        );
+        assert_eq!(storage.resize_lens(), [12]);
+        let decoded = FixedTrailingVecArgs::decode(view.bytes()).unwrap();
+        assert_eq!(decoded.tail().as_slice(), &[1, 2]);
+    }
+}
+
+#[test]
+fn account_view_retains_exclusive_access_after_rejected_and_successful_growth() {
+    use pinocchio::account::{
+        AccountView, RuntimeAccount, MAX_PERMITTED_DATA_INCREASE, NOT_BORROWED,
+    };
+
+    #[repr(C)]
+    struct AccountBuffer {
+        header: RuntimeAccount,
+        data: [u8; FixedTrailingVecArgs::MIN_DATA_LEN + MAX_PERMITTED_DATA_INCREASE],
+    }
+    let mut buffer = AccountBuffer {
+        header: RuntimeAccount {
+            borrow_state: NOT_BORROWED,
+            is_writable: 1,
+            data_len: FixedTrailingVecArgs::MIN_DATA_LEN as u64,
+            ..Default::default()
+        },
+        data: [0; FixedTrailingVecArgs::MIN_DATA_LEN + MAX_PERMITTED_DATA_INCREASE],
+    };
+    // SAFETY: The allocation holds the runtime header followed by the account
+    // data and its full growth allowance, and outlives the view and its borrows.
+    let account = unsafe { AccountView::new_unchecked((&raw mut buffer).cast()) };
+    let mut view = FixedTrailingVecArgs::decode_mut(&account).unwrap();
+    let mut tail = view.tail_mut();
+    assert_eq!(
+        tail.extend_from_slice(&vec![0; MAX_PERMITTED_DATA_INCREASE / 2]),
+        Err(ProgramError::InvalidRealloc)
+    );
+    assert_eq!((tail.len(), tail.capacity()), (0, 0));
+    assert_eq!(
+        account.check_borrow(),
+        Err(ProgramError::AccountBorrowFailed)
+    );
+
+    tail.push(42).unwrap();
+    *view.header_mut() = 7;
+    assert_eq!(
+        account.check_borrow(),
+        Err(ProgramError::AccountBorrowFailed)
+    );
+    drop(view);
+
+    let bytes = account.try_borrow().unwrap();
+    let decoded = FixedTrailingVecArgs::decode(&bytes).unwrap();
+    assert_eq!(decoded.header(), 7);
+    assert_eq!(decoded.tail().as_slice(), &[42]);
 }
 
 #[fixed_offset_layout(buffer_offset = 1)]
@@ -749,17 +943,19 @@ fn fixed_offset_layout_mutates_fixed_capacity_fixed_layout_vec_storage() {
     let mut view = FixedEntryVecArgs::decode_mut(&storage).unwrap();
 
     {
-        let mut entries = view.entries_mut().unwrap();
+        let mut entries = view.entries_mut();
         assert_eq!(entries.len(), 0);
         assert_eq!(entries.capacity(), 3);
 
         entries.push(&FixedEntry::new(0x0102, Some(false))).unwrap();
         entries.push(&FixedEntry::new(0x0304, Some(true))).unwrap();
         entries.push(&FixedEntry::new(0x0708, None)).unwrap();
-        let full = storage.bytes();
+        let full = view.bytes().to_vec();
         assert_eq!(&full[..6], &[9, 3, 0x02, 0x01, 1, 0]);
+        let mut entries = view.entries_mut();
         entries.truncate(entries.len()).unwrap();
-        assert_eq!(storage.bytes(), full);
+        assert_eq!(view.bytes(), full);
+        let mut entries = view.entries_mut();
 
         entries.set(0, &FixedEntry::new(0x0506, None)).unwrap();
         entries.pop().unwrap();
@@ -767,6 +963,7 @@ fn fixed_offset_layout_mutates_fixed_capacity_fixed_layout_vec_storage() {
         entries.truncate(1).unwrap();
     }
 
+    drop(view);
     assert_eq!(storage.data_len(), original_len);
     let bytes = storage.bytes();
     let aligned = aligned_copy::<64>(&bytes);
@@ -809,7 +1006,7 @@ fn trailing_entry_vec_round_trips_through_storage() {
 
     let storage = TestStorage::new(empty);
     let mut view = FixedTrailingEntryVecArgs::decode_mut(&storage).unwrap();
-    let mut entries = view.entries_mut().unwrap();
+    let mut entries = view.entries_mut();
     assert_eq!((entries.len(), entries.capacity()), (0, 0));
     value.entries = vec![
         FixedEntry::new(0x0102, Some(false)),
@@ -820,7 +1017,7 @@ fn trailing_entry_vec_round_trips_through_storage() {
     }
     let encoded = value.encode().unwrap();
     assert_eq!(encoded, [7, 2, 2, 1, 1, 0, 4, 3, 1, 1]);
-    assert_eq!(storage.bytes(), encoded);
+    assert_eq!(view.bytes(), encoded);
     let aligned = aligned_copy::<10>(&encoded);
     let decoded = FixedTrailingEntryVecArgs::decode(&aligned.0).unwrap();
     assert_eq!(decoded.entries().len(), 2);
@@ -829,9 +1026,11 @@ fn trailing_entry_vec_round_trips_through_storage() {
         assert_eq!(actual.enabled(), expected.enabled);
     }
 
+    let mut entries = view.entries_mut();
     entries.set(0, &FixedEntry::new(0x0506, None)).unwrap();
     entries.pop().unwrap();
     assert_eq!((entries.len(), entries.capacity()), (1, 2));
+    drop(view);
     let bytes = storage.bytes();
     let aligned = aligned_copy::<10>(&bytes);
     let view = FixedTrailingEntryVecArgs::decode(&aligned.0[..bytes.len()]).unwrap();
