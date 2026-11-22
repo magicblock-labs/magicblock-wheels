@@ -565,6 +565,32 @@ struct FlexibleVariableNestedOptionArgs {
 }
 
 #[test]
+fn numeric_nested_option_round_trips_at_its_declared_offset() {
+    #[fixed_offset_layout(buffer_offset = 2)]
+    struct Child {
+        value: u8,
+    }
+    #[fixed_offset_layout(buffer_offset = 0)]
+    struct Parent {
+        version: u8,
+        #[flexible]
+        child: Option<Child>,
+    }
+
+    let record = Parent {
+        version: 7,
+        child: Some(Child { value: 42 }),
+    };
+    let mut bytes = Aligned([0; Parent::MAX_DATA_LEN]);
+    assert!(record.encode_to(&mut bytes.0).unwrap().is_empty());
+    assert_eq!(bytes.0, [7, 1, 42]);
+    assert_eq!(
+        Parent::decode(&bytes.0).unwrap().child().unwrap().value(),
+        42
+    );
+}
+
+#[test]
 fn fixed_offset_layout_supports_flexible_variable_nested_option() {
     assert_eq!(FlexibleVariableNestedOptionArgs::MIN_DATA_LEN, 2);
     assert_eq!(FlexibleVariableNestedOptionArgs::MAX_DATA_LEN, 260);

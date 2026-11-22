@@ -300,6 +300,44 @@ pub trait DataLayoutKind {
     const IS_FIXED: bool;
 }
 
+/// Starting address required by a nested layout, expressed modulo eight.
+/// Both layout macros implement this trait. Handwritten children used in
+/// fixed-offset options must declare their placement as well.
+///
+/// A version byte and an option tag place the child at byte 2 in this parent.
+///
+/// ```compile_fail,E0080
+/// # extern crate alloc;
+/// use wheels::fixed_offset_layout;
+/// #[fixed_offset_layout(buffer_offset = 0)]
+/// struct Child { value: u8 }
+/// #[fixed_offset_layout(buffer_offset = 0)]
+/// struct Parent {
+///     version: u8,
+///     #[flexible]
+///     child: Option<Child>,
+/// }
+/// ```
+///
+/// A parent accepting every address also requires a child accepting every address.
+///
+/// ```compile_fail,E0080
+/// # extern crate alloc;
+/// use wheels::{fixed_offset_layout, variable_offset_layout};
+/// #[variable_offset_layout(buffer_offset = 2)]
+/// struct Child { value: u8 }
+/// #[fixed_offset_layout(buffer_offset = any)]
+/// struct Parent {
+///     version: u8,
+///     #[flexible]
+///     child: Option<Child>,
+/// }
+/// ```
+pub trait LayoutPlacement {
+    /// `None` accepts every address. `Some(0..=7)` requires that byte offset.
+    const BUFFER_OFFSET: Option<usize>;
+}
+
 pub trait FixedSizeLayout: Encodable + Decodable {
     const DATA_LEN: usize;
 }

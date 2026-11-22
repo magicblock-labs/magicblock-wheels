@@ -5,8 +5,8 @@ use std::{
 
 use crate::common::{
     ensure_allow_dead_code, impl_where_clause, is_bool, is_string, option_inner, parse_value_kind,
-    read_copy_expr, strip_field_attr, usize_lit, vec_inner, AccessMode, FixedValueKind,
-    MAX_SUPPORTED_VEC_LEN,
+    read_copy_expr, strip_field_attr, usize_lit, vec_inner, AccessMode, BufferOffset,
+    FixedValueKind, MAX_SUPPORTED_VEC_LEN,
 };
 use proc_macro2::Span;
 use quote::{format_ident, quote};
@@ -36,6 +36,7 @@ pub(crate) fn expand_variable_offset_layout(
     ensure_allow_dead_code(&mut emitted_input.attrs);
 
     let struct_name = &emitted_input.ident;
+    let layout_placement = args.buffer_offset.layout_placement_impl(struct_name);
     let view_name = format_ident!("{}View", struct_name);
     let buffer_offset_validation = match args.buffer_offset {
         BufferOffset::Fixed(buffer_offset) => {
@@ -232,6 +233,7 @@ pub(crate) fn expand_variable_offset_layout(
 
     Ok(quote! {
         #emitted_input
+        #layout_placement
 
         impl #struct_name {
             const __MIN_DATA_LEN: usize = #min_datalen_expr;
@@ -1528,12 +1530,6 @@ fn parse_field_layout(
 struct LayoutArgs {
     option_encoding: StructOptionEncoding,
     buffer_offset: BufferOffset,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BufferOffset {
-    Fixed(usize),
-    Any,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

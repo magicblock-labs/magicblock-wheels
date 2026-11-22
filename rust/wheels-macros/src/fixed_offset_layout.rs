@@ -1,7 +1,7 @@
 use crate::common::{
     ensure_allow_dead_code, impl_where_clause, is_bool, is_string, option_inner, parse_value_kind,
-    read_copy_expr, strip_field_attr, usize_lit, vec_inner, AccessMode, FixedValueKind,
-    MAX_SUPPORTED_VEC_LEN,
+    read_copy_expr, strip_field_attr, usize_lit, vec_inner, AccessMode, BufferOffset,
+    FixedValueKind, MAX_SUPPORTED_VEC_LEN,
 };
 use proc_macro2::Span;
 use quote::{format_ident, quote};
@@ -33,6 +33,7 @@ pub(crate) fn expand_fixed_offset_layout(
     ensure_allow_dead_code(&mut emitted_input.attrs);
 
     let struct_name = &emitted_input.ident;
+    let layout_placement = args.buffer_offset.layout_placement_impl(struct_name);
     let view_name = format_ident!("{}View", struct_name);
     let view_mut_name = format_ident!("{}ViewMut", struct_name);
     let buffer_offset_validation = match args.buffer_offset {
@@ -98,6 +99,15 @@ pub(crate) fn expand_fixed_offset_layout(
                 #[doc = #doc]
                 const _: () = assert!(#size > 0, #message);
             });
+        }
+
+        if let FixedFieldKind::NestedLayoutOption { ty, .. } = &layout {
+            schema_checks.push(nested_offset_assertion(
+                ty,
+                field_ident,
+                args.buffer_offset,
+                quote!(#offset_expr + 1usize),
+            ));
         }
 
         match layout.check_ref_alignment(offset_value, args.buffer_offset, field_ident) {
@@ -353,6 +363,7 @@ pub(crate) fn expand_fixed_offset_layout(
 
     Ok(quote! {
         #emitted_input
+        #layout_placement
         #(#schema_checks)*
 
         impl #struct_name {
@@ -1495,21 +1506,6 @@ struct LayoutArgs {
     buffer_offset: BufferOffset,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BufferOffset {
-    Fixed(usize),
-    Any,
-}
-
-impl BufferOffset {
-    fn value(self) -> Option<usize> {
-        match self {
-            Self::Fixed(value) => Some(value),
-            Self::Any => None,
-        }
-    }
-}
-
 fn parse_args(attr: &str) -> syn::Result<LayoutArgs> {
     if attr.trim().is_empty() {
         return Err(syn::Error::new(
@@ -1782,6 +1778,24 @@ fn can_mut_borrow_value(
     };
 
     (buffer_offset + offset) % align == 0
+}
+
+fn nested_offset_assertion(
+    child: &Type,
+    field: &Ident,
+    parent: BufferOffset,
+    payload_offset: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let child_offset = quote!(<#child as ::wheels::layout::LayoutPlacement>::BUFFER_OFFSET);
+    let (compatible, message) = match parent {
+        BufferOffset::Any => (quote!(#child_offset.is_none()),
+            format!("field `{field}` requires a child with `buffer_offset = any` because the parent can start anywhere")),
+        BufferOffset::Fixed(base) => (quote!(match #child_offset {
+            Some(required) => (#base + #payload_offset) % 8 == required,
+            None => true,
+        }), format!("field `{field}` places its child at an incompatible buffer offset")),
+    };
+    quote! { const _: () = assert!(#compatible, #message); }
 }
 
 fn bytes_slice_expr(offset: proc_macro2::TokenStream, len: usize) -> proc_macro2::TokenStream {
