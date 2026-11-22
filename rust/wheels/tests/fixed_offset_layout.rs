@@ -184,7 +184,7 @@ fn account_config_round_trips_and_mutates_scalar_fields() {
     assert_eq!(view.sponsored(), Some(true));
 }
 
-#[fixed_offset_layout(buffer_offset = 0)]
+#[fixed_offset_layout(buffer_offset = unknown)]
 struct FixedNestedOptionArgs {
     header: u8,
     config: Option<AccountConfig>,
@@ -224,6 +224,39 @@ fn fixed_offset_layout_supports_fixed_nested_option() {
     assert_eq!(config_view.authority(), &config.authority);
     assert_eq!(config_view.threshold(), config.threshold);
     assert_eq!(config_view.enabled(), config.enabled);
+}
+
+#[fixed_offset_layout(buffer_offset = 0)]
+struct FixedNestedOptionVecArgs {
+    _padding: [u8; 7],
+    #[capacity = 2]
+    entries: Vec<FixedNestedOptionArgs>,
+}
+
+#[test]
+fn packed_nested_entries_round_trip() {
+    assert_eq!(FixedNestedOptionVecArgs::DATA_LEN, 86);
+    let storage = TestStorage::new(vec![0; FixedNestedOptionVecArgs::DATA_LEN]);
+    let mut view = FixedNestedOptionVecArgs::decode_mut(&storage).unwrap();
+    let mut entries = view.entries_mut();
+    let first = FixedNestedOptionArgs {
+        header: 11,
+        config: None,
+    };
+    let second = FixedNestedOptionArgs {
+        header: 22,
+        config: None,
+    };
+
+    // The first entry starts at byte 8. Its 39-byte width puts the second at byte 47.
+    entries.push(&first).unwrap();
+    entries.push(&second).unwrap();
+
+    let decoded = FixedNestedOptionVecArgs::decode(view.bytes()).unwrap();
+    let entries = decoded.entries();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.get(0).unwrap().header(), first.header);
+    assert_eq!(entries.get(1).unwrap().header(), second.header);
 }
 
 #[fixed_offset_layout(buffer_offset = 0)]

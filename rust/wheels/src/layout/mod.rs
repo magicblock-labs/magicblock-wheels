@@ -106,7 +106,7 @@
 //! | `Option<T>` of a user-defined layout | Must be the final field. A normal option requires `T: FixedSizeLayout` and reserves a tag plus `T::DATA_LEN` bytes. With `#[flexible]`, `T: Encodable + Decodable + LayoutBounds` may have variable size; `None` omits all bytes and `Some` uses the encoded payload length. | Requires `T: FixedSizeLayout`; uses tagged encoding and dynamically advances later field offsets. It is not supported with `option = implicit`. |
 //! | Mutation | `decode_mut(storage)` is generated for every fixed layout. Fixed-capacity Vec fields return [`FixedCapacityVec`] and can grow active `len` up to schema capacity without resizing storage. Final extendable Vec fields return [`ExtendableVec`] and may resize storage. | Not currently generated. |
 //! | Prefix decoding | Constant-size layouts implement [`PrefixDecodable`]. Trailing variable-length layouts implement [`Decodable`]; final extendable Vec decodes the supplied storage region, while final flexible Option remains exactly framed. | Normal layouts implement [`PrefixDecodable`]. Layouts using `option = implicit` need exact framing and implement [`Decodable`]. |
-//! | Alignment | Use `buffer_offset = 0..=7` when the input starts at a known offset from an 8-byte aligned base. Use `buffer_offset = unknown` only when generated views do not borrow alignment-sensitive fields. | Use `buffer_offset = 0..=7` when the input starts at a known offset from an 8-byte aligned base; use `buffer_offset = unknown` only when generated views do not borrow alignment-sensitive fields. |
+//! | [Alignment Requirement](#alignment-requirement) | Check the address of the borrowed payload at its fixed offset. | Check every position the borrowed payload can occupy as earlier fields change length. |
 //!
 //! # Attribute Reference
 //!
@@ -121,6 +121,31 @@
 //! | `#[flexible = N]` | Not supported; fixed trailing Vecs use `#[extendable = N]`. | Field-level; every `Vec<T>` field. | Uses an `N`-byte length header (`1..=8`) and encodes only active elements. `N` is length-header width, not capacity, and later field offsets are decoded dynamically. |
 //! | `#[element_size = fixed]` | Not supported. | Field-level; user-defined `Vec<T>` element types only. | Declares that each nested layout element has constant encoded width, so generated getters can return [`FixedLayoutSlice`]. |
 //! | `#[element_size = variable]` | Not supported. | Field-level; user-defined `Vec<T>` element types only. | Declares that nested layout elements are prefix-decodable variable-size values, so generated getters return [`VariableLayoutSlice`]. |
+//!
+//! # Alignment Requirement
+//!
+//! | `buffer_offset` | When to use it |
+//! |---|---|
+//! | `unknown` | The struct can start anywhere. Its getters copy values or borrow types with alignment 1.<ul><li>`threshold: u16`</li><li>`authority: Pubkey`</li></ul> |
+//! | `0` through `7` | A getter borrows a type with alignment greater than 1. Use the struct's starting address modulo 8. The macro rejects `unknown` for these fields.<ul><li>`items: Vec<u16>`</li><li>`counters: [u32; 3]`</li></ul> |
+//!
+//! <aside role="note" style="border-inline-start: 4px solid #548ed0; background-color: rgba(84, 142, 208, 0.1); padding: 0.75rem 1rem;">
+//! <strong><span aria-hidden="true">ⓘ</span> How to check alignment</strong>
+//!
+//! A borrowed `T` must start at a multiple of `align_of::<T>()`. For every
+//! possible payload position, `payload_offset` counts all preceding bytes in
+//! the struct, including tags and length headers.
+//!
+//! `(buffer_offset + payload_offset) % align_of::<T>() == 0`
+//!
+//! - **Borrowing a slice.** With a one-byte tag and an eight-byte length header,
+//!   a struct starting at byte 1 puts the first `u16` at byte `1 + 1 + 8 = 10`
+//!   (even, aligned). Starting at byte 0 puts it at byte 9 (odd, misaligned).
+//! - **Packing nested structs.** Two 39-byte entries starting at bytes 8 and 47
+//!   can both use `unknown` if their fields allow it. A child declaring
+//!   `buffer_offset = 0` can start at byte 8, but byte 47 fails its offset check.
+//!
+//! </aside>
 //!
 //! # Mutability
 //!
