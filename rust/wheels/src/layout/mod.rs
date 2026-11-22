@@ -167,7 +167,8 @@
 //!   (even, aligned). Starting at byte 0 puts it at byte 17 (odd, misaligned).
 //! - **Packing nested structs.** Two 39-byte entries starting at bytes 8 and 47
 //!   can both use `any` if their fields allow it. A child declaring
-//!   `buffer_offset = 0` can start at byte 8, but byte 47 fails its offset check.
+//!   `buffer_offset = 0` can start at byte 8. A fixed-offset parent reserving
+//!   both slots fails to compile because byte 47 has offset 7.
 //!
 //! </details>
 //!
@@ -347,7 +348,7 @@ pub trait DataLayoutKind {
 
 /// Starting address required by a nested layout, expressed modulo eight.
 /// Both layout macros implement this trait. Handwritten children used in
-/// fixed-offset options must declare their placement as well.
+/// fixed-offset options or vectors must declare their placement as well.
 ///
 /// A version byte and an option tag place the child at byte 2 in this parent.
 ///

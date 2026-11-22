@@ -265,6 +265,61 @@ fn packed_nested_entries_round_trip() {
     assert_eq!(entries.get(1).unwrap().header(), second.header);
 }
 
+#[test]
+fn single_packed_slot_only_needs_its_first_offset_to_match() {
+    #[fixed_offset_layout(buffer_offset = 0)]
+    struct Child {
+        key: [u8; 32],
+        tag: [u8; 7],
+    }
+    #[fixed_offset_layout(buffer_offset = 0)]
+    struct Parent {
+        pad: [u8; 7],
+        #[capacity = 1]
+        entries: Vec<Child>,
+    }
+
+    let mut bytes = Aligned([0; Parent::DATA_LEN]);
+    let record = Parent {
+        pad: [0; 7],
+        entries: vec![Child {
+            key: [42; 32],
+            tag: [0; 7],
+        }],
+    };
+    assert!(record.encode_to(&mut bytes.0).unwrap().is_empty());
+    assert_eq!(
+        Parent::decode(&bytes.0)
+            .unwrap()
+            .entries()
+            .get(0)
+            .unwrap()
+            .key(),
+        &[42; 32]
+    );
+}
+
+#[test]
+fn packed_extendable_slots_account_for_both_headers() {
+    #[fixed_offset_layout(buffer_offset = 2)]
+    struct Child {
+        id: u64,
+    }
+    #[fixed_offset_layout(buffer_offset = 0)]
+    struct Parent {
+        #[extendable = 1]
+        entries: Vec<Child>,
+    }
+
+    let record = Parent {
+        entries: vec![Child { id: 1 }, Child { id: 2 }],
+    };
+    let mut bytes = Aligned([0; Parent::MIN_DATA_LEN + 2 * Child::DATA_LEN]);
+    assert!(record.encode_to(&mut bytes.0).unwrap().is_empty());
+    let parent = Parent::decode(&bytes.0).unwrap();
+    assert_eq!(parent.entries().get(1).unwrap().id(), 2);
+}
+
 #[fixed_offset_layout(buffer_offset = any)]
 struct FlexibleNestedOptionArgs {
     header: u8,

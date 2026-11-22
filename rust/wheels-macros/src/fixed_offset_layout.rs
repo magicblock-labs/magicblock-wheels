@@ -101,14 +101,11 @@ pub(crate) fn expand_fixed_offset_layout(
             });
         }
 
-        if let FixedFieldKind::NestedLayoutOption { ty, .. } = &layout {
-            schema_checks.push(nested_offset_assertion(
-                ty,
-                field_ident,
-                args.buffer_offset,
-                quote!(#offset_expr + 1usize),
-            ));
-        }
+        schema_checks.push(layout.nested_placement_checks(
+            &offset_expr,
+            args.buffer_offset,
+            field_ident,
+        ));
 
         match layout.check_ref_alignment(offset_value, args.buffer_offset, field_ident) {
             Ok(Some(issue)) => {
@@ -793,6 +790,37 @@ impl FixedFieldKind {
                     ),
                 }))
             }
+        }
+    }
+
+    fn nested_placement_checks(
+        &self,
+        offset: &proc_macro2::TokenStream,
+        parent: BufferOffset,
+        field: &Ident,
+    ) -> proc_macro2::TokenStream {
+        let (child, header, multiple_slots) = match self {
+            Self::NestedLayoutOption { ty, .. } => (ty, 1, false),
+            Self::Vec {
+                elem: FixedVecElementKind::FixedSizeLayout { ty },
+                capacity,
+            } if capacity.max_capacity() > 0 => {
+                (ty, capacity.header_size(), capacity.max_capacity() > 1)
+            }
+            _ => return quote!(),
+        };
+        let first = nested_offset_assertion(child, field, parent, quote!(#offset + #header));
+        if !multiple_slots || parent == BufferOffset::Any {
+            return first;
+        }
+        let message = format!("field `{field}` has a stride that places its second child at an incompatible buffer offset");
+        quote! {
+            #first
+            const _: () = assert!(
+                <#child as ::wheels::layout::LayoutPlacement>::BUFFER_OFFSET.is_none()
+                    || <#child as ::wheels::layout::FixedSizeLayout>::DATA_LEN.is_multiple_of(8),
+                #message
+            );
         }
     }
 
