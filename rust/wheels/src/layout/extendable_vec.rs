@@ -147,14 +147,9 @@ impl<'a, T, S: ?Sized, K> ExtendableVec<'a, T, S, K> {
 
     /// Returns the active encoded length of this Vec field.
     ///
-    /// Empty extendable Vec values omit the length header and payload, so their
-    /// active encoded length is zero.
+    /// Includes the length header even when the element count is zero.
     pub fn encoded_len(&self) -> usize {
-        if self.len == 0 {
-            0
-        } else {
-            self.len_width + self.len * self.elem_size
-        }
+        self.len_width + self.len * self.elem_size
     }
 
     fn data_start(&self) -> usize {
@@ -177,7 +172,7 @@ impl<'a, T, K> ExtendableVec<'a, T, (), K> {
 
     /// Returns the trailing storage region for this Vec field.
     ///
-    /// The returned bytes include the length header when one is present and all
+    /// The returned bytes include the length header and all
     /// spare trailing capacity supplied to `decode()`. They do not include the
     /// fixed fields that come before the extendable Vec.
     pub fn storage_bytes(&self) -> &'a [u8] {
@@ -186,21 +181,17 @@ impl<'a, T, K> ExtendableVec<'a, T, (), K> {
 
     /// Returns the byte count from the start of this field to the end of the buffer.
     ///
-    /// This includes the length header, when present, and all occupied and spare
+    /// This includes the length header and all occupied and spare
     /// slots. With a two-byte header and four `u16` slots, [`capacity()`](Self::capacity)
     /// is 4 and `storage_len()` is `2 + 4 * 2 = 10` bytes. An empty vector
-    /// encoded without a header uses zero bytes.
+    /// with no spare slots uses only its two-byte header in this example.
     pub fn storage_len(&self) -> usize {
         self.storage_bytes().len()
     }
 
     /// Returns the active Vec payload bytes, without the length header.
     pub fn active_bytes(&self) -> &'a [u8] {
-        if self.len == 0 {
-            &[]
-        } else {
-            &self.all_bytes()[self.active_range()]
-        }
+        &self.all_bytes()[self.active_range()]
     }
 }
 
@@ -398,7 +389,7 @@ where
 {
     /// Returns the byte count from the start of this field to the end of storage.
     ///
-    /// This includes the length header, when present, and the bytes for every
+    /// This includes the length header and the bytes for every
     /// occupied and spare slot. [`capacity()`](Self::capacity) counts elements.
     /// [`clear()`](Self::clear) keeps the allocated slots and header, so an empty
     /// vector can still have a nonzero storage length.
@@ -499,13 +490,6 @@ fn decode_storage_len(
     if elem_size == 0 {
         return Err(DataLayoutError::InvalidDataLength);
     }
-    if bytes.len() == offset {
-        return Ok((0, 0));
-    }
-    if bytes.len() < offset + len_width {
-        return Err(DataLayoutError::MissingLengthHeader);
-    }
-
     let capacity = storage_capacity(bytes.len(), offset, len_width, elem_size)?;
     let len = read_len_header(bytes, offset, len_width)?;
     if len > capacity {
@@ -521,11 +505,9 @@ fn storage_capacity(
     len_width: usize,
     elem_size: usize,
 ) -> Result<usize, DataLayoutError> {
-    if storage_len < offset + len_width {
-        return Ok(0);
-    }
-
-    let available = storage_len - offset - len_width;
+    let available = storage_len
+        .checked_sub(offset + len_width)
+        .ok_or(DataLayoutError::MissingLengthHeader)?;
     if !available.is_multiple_of(elem_size) {
         return Err(DataLayoutError::InvalidDataLength);
     }

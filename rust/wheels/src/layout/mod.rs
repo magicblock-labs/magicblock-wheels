@@ -77,7 +77,7 @@
 //! `#[flexible]`, the child must implement [`PrefixDecodable`] so it can
 //! identify the end of its payload. This rules out children using
 //! `option = implicit`, which infer presence from the supplied slice length.
-//! An absent flexible option occupies zero bytes.
+//! An absent flexible option occupies one byte for its zero tag.
 //!
 //! [`variable_offset_layout!`](crate::variable_offset_layout) supports `Vec<T>`
 //! where `T` is a user-defined layout type. Those fields must choose
@@ -100,14 +100,14 @@
 //! | Field offsets | Field starts are compile-time offsets, except total length may vary when the final field is variable-length. | Offsets after a variable-size field are computed from encoded lengths at decode time. |
 //! | Encoded size | Constant-size layouts expose `DATA_LEN`; trailing variable-length layouts expose `MIN_DATA_LEN` and `MAX_DATA_LEN`. | Fixed-size layouts expose `DATA_LEN`; finite optional-size layouts expose `DATA_LENS`; Vec layouts expose `DATA_LEN_RANGE`. |
 //! | Normal `Option<T>` | Encodes a 1-byte tag plus payload when present. | Encodes a 1-byte tag plus payload when present. |
-//! | Flexible `Option<T>` | The final field may use `#[flexible]`; `None` omits the field entirely and `Some` writes tag plus payload. | Not supported as a field attribute. Use normal tagged options, or `option = implicit` for eligible compatibility types. |
+//! | Flexible `Option<T>` | The final field may use `#[flexible]`; `None` writes `00` and `Some` writes `01` followed by the payload. | Not supported as a field attribute. Use normal tagged options, or `option = implicit` for eligible compatibility types. |
 //! | Implicit `Option<T>` | Not supported. | ⚠️ Backward compatibility only; avoid for new types. The struct-level `option = implicit` mode omits option tags and saves one byte per `Option<T>`, but is allowed only when there are no Vec fields and option presence can be inferred unambiguously from total encoded length. |
 //! | `Vec<T>` of supported scalar/key types | Uses `#[capacity = N]` to reserve space for `N` elements. Views expose active `len` and a `<field>_capacity()` method. | Uses `#[flexible = N]` to encode only active elements. Views return borrowed slices like `&[T]`. |
-//! | Extendable `Vec<T>` | Allowed only as the final field with `#[extendable = N]`, where `N` can be `1..=8`. Canonical `encode()` writes only active bytes. `decode()` may receive larger storage and exposes spare trailing bytes as [`ExtendableVec::capacity`]. | Not supported. Every Vec uses `#[flexible = N]` and models only active encoded elements. |
+//! | Extendable `Vec<T>` | Allowed only as the final field with `#[extendable = N]`, where `N` can be `1..=8`. Canonical `encode()` writes the count followed by the active elements. `decode()` may receive larger storage and exposes spare trailing bytes as [`ExtendableVec::capacity`]. | Not supported. Every Vec uses `#[flexible = N]` and models only active encoded elements. |
 //! | `Vec<T>` of user-defined layout types | Requires `T: FixedSizeLayout`; uses `#[capacity = N]` or final `#[extendable = N]`. Fixed-capacity getters return [`FixedLayoutSlice`]; final extendable getters return [`ExtendableVec`]. | Requires `#[element_size = fixed]` or `#[element_size = variable]`. Fixed elements return [`FixedLayoutSlice`]; variable elements return [`VariableLayoutSlice`]. |
-//! | `Option<T>` of a user-defined layout | Must be the final field. A normal option requires `T: FixedSizeLayout` and reserves a tag plus `T::DATA_LEN` bytes. With `#[flexible]`, `T: Encodable + PrefixDecodable + LayoutBounds` may have variable size. `None` omits all bytes and `Some` uses the encoded payload length. | Requires `T: FixedSizeLayout`; uses tagged encoding and dynamically advances later field offsets. It is not supported with `option = implicit`. |
+//! | `Option<T>` of a user-defined layout | Must be the final field. A normal option requires `T: FixedSizeLayout` and reserves a tag plus `T::DATA_LEN` bytes. With `#[flexible]`, `T: Encodable + PrefixDecodable + LayoutBounds` may have variable size. `None` occupies one tag byte and `Some` adds the encoded payload. | Requires `T: FixedSizeLayout`; uses tagged encoding and dynamically advances later field offsets. It is not supported with `option = implicit`. |
 //! | Mutation | `decode_mut(storage)` is generated for every fixed layout. Fixed-capacity Vec fields return [`FixedCapacityVec`] and can grow active `len` up to schema capacity without resizing storage. Final extendable Vec fields return [`ExtendableVec`] and may resize storage. | Not currently generated. |
-//! | Prefix decoding | Constant-size layouts implement [`PrefixDecodable`]. Trailing variable-length layouts implement [`Decodable`]; final extendable Vec decodes the supplied storage region, while final flexible Option remains exactly framed. | Normal layouts implement [`PrefixDecodable`]. Layouts using `option = implicit` need exact framing and implement [`Decodable`]. |
+//! | Prefix decoding | All fixed-offset layouts implement [`PrefixDecodable`]. Use `decode_prefix()` to read one record and return the remaining bytes. | Normal layouts implement [`PrefixDecodable`]. Layouts using `option = implicit` need exact framing and implement [`Decodable`]. |
 //! | [Alignment Requirement](#alignment-requirement) | Check the address of the borrowed payload at its fixed offset. | Check every position the borrowed payload can occupy as earlier fields change length. |
 //!
 //! # Attribute Reference
@@ -118,11 +118,31 @@
 //! | `buffer_offset = any` | Struct-level; required alternative. | Struct-level; required alternative. | Use when the slice can start at any address. The decoder skips pointer-offset checking, and the macro rejects borrowed views that need alignment greater than 1. |
 //! | `option = implicit` | Not supported. | Struct-level; optional. | Backward-compatibility mode for structs without Vec fields. It omits option tags and infers option presence from the total encoded length. |
 //! | `#[capacity = N]` | Field-level; fixed-capacity `Vec<T>` only. | Not supported. | Reserves exactly `N` element slots in fixed-offset storage. The active Vec length may change up to that schema capacity without resizing storage. |
-//! | `#[extendable = N]` | Field-level; final `Vec<T>` only. | Not supported. | Uses an `N`-byte length header (`1..=8`) for a trailing Vec. `N` is length-header width, not capacity. Canonical encoding contains only active elements, while decoding larger trailing storage exposes spare capacity through [`ExtendableVec`]. |
-//! | `#[flexible]` | Field-level; final `Option<T>` only. | Not supported. | Makes a trailing option omit all bytes for `None`; `Some` stores the normal option tag plus payload. |
+//! | `#[extendable = N]` | Field-level; final `Vec<T>` only. | Not supported. | Uses an `N`-byte length header (`1..=8`) for a trailing Vec. `N` is length-header width, not capacity. Encoding writes the count even for an empty vector. Decoding a caller-framed storage region can expose spare capacity through [`ExtendableVec`]. |
+//! | `#[flexible]` | Field-level; final `Option<T>` only. | Not supported. | Stores a single `00` tag for `None` or `01` followed by the payload for `Some`. |
 //! | `#[flexible = N]` | Not supported; fixed trailing Vecs use `#[extendable = N]`. | Field-level; every `Vec<T>` field. | Uses an `N`-byte length header (`1..=8`) and encodes only active elements. `N` is length-header width, not capacity, and later field offsets are decoded dynamically. |
 //! | `#[element_size = fixed]` | Not supported. | Field-level; user-defined `Vec<T>` element types only. | Declares that each nested layout element has constant encoded width, so generated getters can return [`FixedLayoutSlice`]. |
 //! | `#[element_size = variable]` | Not supported. | Field-level; user-defined `Vec<T>` element types only. | Declares that nested layout elements are prefix-decodable variable-size values, so generated getters return [`VariableLayoutSlice`]. |
+//!
+//! ## What is the difference between `#[extendable = N]` and `#[flexible = N]` on a Vec?
+//!
+//! Both write the element count in `N` little-endian bytes, including a zero count.
+//!
+//! - **Extendable** vectors must be the **last field** of a fixed-offset struct.
+//!   A mutable view can push into spare slots or grow the backing storage.
+//!   Pass only this record's storage to `decode_mut()` so pushes use its own slots.
+//! - **Flexible** vectors can appear **anywhere** in a variable-offset struct.
+//!   In `[count][items][checksum]`, the decoder uses the count to locate the
+//!   checksum. To append an item, update the owned vector and re-encode the struct.
+//!
+//! ## Migrating previously encoded empty fields
+//!
+//! Older fixed-offset records could end immediately before an empty extendable
+//! vector or an absent flexible option. At the known record boundary, insert
+//! `N` zero bytes for the omitted vector count or one zero byte for the omitted
+//! option tag. For example, `[07]` becomes `[07, 00, 00]` for an empty
+//! `#[extendable = 2]` vector or `[07, 00]` for a flexible `None`. Use the old
+//! record length to locate that boundary when another record follows.
 //!
 //! # Alignment Requirement
 //!
@@ -171,7 +191,7 @@
 //! | Copyable integer or fixed-size integer array whose alignment cannot be guaranteed | [`LayoutCopyMut`] | With `any`, a field like `shuttle_id: u32` uses `get()` and `set(value)` to copy its bytes. A numeric offset also uses this wrapper if the field's position does not guarantee alignment.<br><br>`view.shuttle_id_mut().set(101);` |
 //! | `bool` | [`LayoutBoolMut`] | Exposes `get()` and `set(bool)` because the encoded form is a backing `u8`.<br><br>`view.enabled_mut().set(true);` |
 //! | Fixed `Option<T>` | [`LayoutOptionMut`] or [`LayoutBoolOptionMut`] | Updates the tag and payload in place; the reserved option slot size does not change.<br><br>`view.authority_mut().set(Some(key));` |
-//! | Trailing flexible `Option<T>` | [`LayoutOptionMut`] or [`LayoutBoolOptionMut`] | `None` resizes storage back to the field offset; `Some` resizes to tag plus payload length.<br><br>`view.delegate_mut().set(None)?;` |
+//! | Trailing flexible `Option<T>` | [`LayoutOptionMut`] or [`LayoutBoolOptionMut`] | `None` resizes storage to the end of the zero tag. `Some` resizes it to fit the tag and payload.<br><br>`view.delegate_mut().set(None)?;` |
 //! | Final `Option<T>` with a nested layout | [`FixedLayoutOptionMut`] or [`FlexibleLayoutOptionMut`] | Encodes a replacement nested value directly into storage. A normal option retains its reserved payload bytes. A flexible option resizes storage to fit the encoded child.<br><br>`view.config_mut().set(Some(&config))?;` |
 //! | `#[capacity = N] Vec<T>` | [`FixedCapacityVec`] | Can `push`, `pop`, `set`, `truncate`, and `clear` active elements up to schema capacity `N`; it never resizes storage.<br><br>`view.items_mut().push(item)?;` |
 //! | Final `#[extendable = N] Vec<T>` | [`ExtendableVec`] | Can `push`, `extend_from_slice`, `pop`, `set`, `truncate`, and `clear`; it may resize storage to grow capacity because the field is trailing.<br><br>`view.tail_mut().push(item)?;` |
@@ -193,7 +213,7 @@
 //! User-defined `Vec<T>` elements in `fixed_offset_layout` must be fixed-size
 //! layouts and do not use `#[element_size = ...]`.
 //! A final `#[extendable = N] Vec<T>` is the exception to fixed-size total
-//! storage: canonical `encode()` stores only active elements, but `decode()`
+//! storage. Canonical `encode()` stores the count and active elements. `decode()`
 //! can view an account/storage buffer with spare trailing bytes. The generated
 //! getter returns [`ExtendableVec`], which reports both `len()` and `capacity()`.
 //! For mutation, generated `decode_mut(storage)` works with
@@ -334,7 +354,7 @@ impl_tuple_encodable!(A, B);
 impl_tuple_encodable!(A, B, C);
 
 ///
-/// Exact-slice decoding.
+/// Decoding one value from a caller-framed slice.
 ///
 /// Exact decoding is required for layouts with implicit `Option` fields, where option
 /// presence is inferred from total encoded length. For example, with valid
@@ -353,7 +373,8 @@ pub trait Decodable {
     type View<'a>;
 
     ///
-    /// Decodes exactly one value from `bytes`.
+    /// Decodes one value from its storage region. For a trailing extendable
+    /// vector, the region may include spare whole-element slots.
     ///
     fn decode<'a>(bytes: &'a [u8]) -> Result<Self::View<'a>, DataLayoutError>;
 }
@@ -370,6 +391,17 @@ pub trait PrefixDecodable {
     /// Decodes a prefix and returns the decoded view plus unconsumed bytes.
     ///
     fn decode_prefix<'a>(bytes: &'a [u8]) -> Result<(Self::View<'a>, &'a [u8]), DataLayoutError>;
+
+    /// Decodes a caller-framed storage region. By default the frame must contain
+    /// exactly one encoded value. Layouts with an extendable vector also accept
+    /// spare whole-element slots at the end of the frame.
+    fn decode_frame(bytes: &[u8]) -> Result<Self::View<'_>, DataLayoutError> {
+        let (view, remaining) = Self::decode_prefix(bytes)?;
+        if !remaining.is_empty() {
+            return Err(DataLayoutError::InvalidDataLength);
+        }
+        Ok(view)
+    }
 }
 
 impl<T> Decodable for T
@@ -379,11 +411,7 @@ where
     type View<'a> = <T as PrefixDecodable>::View<'a>;
 
     fn decode<'a>(bytes: &'a [u8]) -> Result<Self::View<'a>, DataLayoutError> {
-        let (view, remaining) = T::decode_prefix(bytes)?;
-        if !remaining.is_empty() {
-            return Err(DataLayoutError::InvalidDataLength);
-        }
-        Ok(view)
+        T::decode_frame(bytes)
     }
 }
 

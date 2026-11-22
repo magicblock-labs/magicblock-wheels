@@ -59,7 +59,7 @@ mod variable_offset_layout;
 ///     macro emits `MIN_DATA_LEN` and `MAX_DATA_LEN` instead of `DATA_LEN`.
 ///     These layouts do not implement `FixedSizeLayout`.
 ///
-///     For a trailing extendable Vec, canonical `encode()` output contains only
+///     For a trailing extendable Vec, canonical `encode()` writes the count and
 ///     active elements. `decode()` may also receive larger account/storage bytes
 ///     and treats spare trailing bytes as Vec capacity. Generated getters return
 ///     `ExtendableVec`, which exposes both active `len()` and storage
@@ -117,15 +117,14 @@ mod variable_offset_layout;
 ///       length header.
 ///     - For `N = 8`, the supported Vec length is still capped at
 ///       `u32::MAX`.
-///     - The field contributes only its active payload bytes to canonical
-///       encoded length.
+///     - The encoded length includes the count even for an empty vector.
 ///     - Generated immutable getters return `ExtendableVec`.
 ///     - Generated mutable views expose `<field>_mut()` returning `ExtendableVec`.
 ///
 ///   - `#[flexible]`
 ///
 ///     - Applicable only to the final field when that field is `Option<T>`.
-///     - `None` omits the option tag and payload entirely.
+///     - `None` writes a single zero tag.
 ///     - `Some(value)` writes a tag byte followed by the value payload.
 ///
 /// Supported field kinds:
@@ -148,8 +147,8 @@ mod variable_offset_layout;
 ///     `T` may have a fixed or variable encoded size and must implement
 ///     `Encodable`, `PrefixDecodable`, and `LayoutBounds`. A child using
 ///     `option = implicit` requires an exact slice and cannot supply the
-///     payload boundary. `None` omits the field and `Some` uses the actual
-///     encoded payload length.
+///     payload boundary. `None` stores one zero byte and `Some` stores
+///     the tag and encoded child.
 ///
 /// APIs
 /// ====
@@ -167,8 +166,8 @@ mod variable_offset_layout;
 ///   - all layouts implement `Decodable`; trailing extendable Vec layouts decode
 ///     the supplied final storage region, so spare trailing Vec capacity is
 ///     accepted and exposed by the generated view
-///   - constant-size layouts also implement `PrefixDecodable` and
-///     `FixedSizeLayout`
+///   - all layouts implement `PrefixDecodable` to read one record and return
+///     its remainder. Constant-size layouts also implement `FixedSizeLayout`
 ///
 /// Methods:
 ///   - all layouts emit `decode_mut(storage: &impl LayoutStorageMut)`,
