@@ -54,7 +54,7 @@ pub(crate) fn expand_variable_offset_layout(
                 }
             }
         }
-        BufferOffset::Unknown => quote!(),
+        BufferOffset::Any => quote!(),
     };
 
     let Fields::Named(fields) = &mut emitted_input.fields else {
@@ -1533,7 +1533,7 @@ struct LayoutArgs {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BufferOffset {
     Fixed(usize),
-    Unknown,
+    Any,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1546,7 +1546,7 @@ fn parse_args(attr: &str) -> syn::Result<LayoutArgs> {
     if attr.trim().is_empty() {
         return Err(syn::Error::new(
             Span::call_site(),
-            "variable_offset_layout requires `buffer_offset = 0..=7` or `buffer_offset = unknown`",
+            "variable_offset_layout requires `buffer_offset = 0..=7` or `buffer_offset = any`",
         ));
     }
 
@@ -1596,23 +1596,23 @@ fn parse_args(attr: &str) -> syn::Result<LayoutArgs> {
                         let Some(ident) = value.path.get_ident() else {
                             return Err(syn::Error::new_spanned(
                                 value,
-                                "buffer_offset must be an integer in 0..=7 or `unknown`",
+                                "buffer_offset must be an integer in 0..=7 or `any`",
                             ));
                         };
 
-                        if ident == "unknown" {
-                            buffer_offset = Some(BufferOffset::Unknown);
+                        if ident == "any" {
+                            buffer_offset = Some(BufferOffset::Any);
                         } else {
                             return Err(syn::Error::new_spanned(
                                 ident,
-                                "buffer_offset must be an integer in 0..=7 or `unknown`",
+                                "buffer_offset must be an integer in 0..=7 or `any`",
                             ));
                         }
                     }
                     other => {
                         return Err(syn::Error::new_spanned(
                             other,
-                            "buffer_offset must be an integer in 0..=7 or `unknown`",
+                            "buffer_offset must be an integer in 0..=7 or `any`",
                         ));
                     }
                 }
@@ -1620,7 +1620,7 @@ fn parse_args(attr: &str) -> syn::Result<LayoutArgs> {
             _ => {
                 return Err(syn::Error::new_spanned(
                     meta,
-                    "variable_offset_layout only supports `option = implicit`, `buffer_offset = 0..=7`, and `buffer_offset = unknown`",
+                    "variable_offset_layout only supports `option = implicit`, `buffer_offset = 0..=7`, and `buffer_offset = any`",
                 ))
             }
         }
@@ -1629,7 +1629,7 @@ fn parse_args(attr: &str) -> syn::Result<LayoutArgs> {
     let Some(buffer_offset) = buffer_offset else {
         return Err(syn::Error::new(
             Span::call_site(),
-            "variable_offset_layout requires `buffer_offset = 0..=7` or `buffer_offset = unknown`",
+            "variable_offset_layout requires `buffer_offset = 0..=7` or `buffer_offset = any`",
         ));
     };
 
@@ -1940,7 +1940,7 @@ fn validate_borrowed_field_alignment(
             if align > 1 {
                 return Err(syn::Error::new(
                     field_ident.span(),
-                    requirement.unknown_offset_message(field_ident),
+                    requirement.any_offset_message(field_ident),
                 ));
             }
             continue;
@@ -2039,15 +2039,15 @@ impl BorrowedRequirement {
         }
     }
 
-    fn unknown_offset_message(self, field_ident: &Ident) -> String {
+    fn any_offset_message(self, field_ident: &Ident) -> String {
         let align = self.align();
         match self {
             Self::Value { .. } => format!(
-                "field `{}` cannot be borrowed with `buffer_offset = unknown`: it requires {}-byte alignment, but the input slice may start at any address",
+                "field `{}` cannot be borrowed with `buffer_offset = any`: it requires {}-byte alignment, but the input slice may start at any address",
                 field_ident, align
             ),
             Self::Vec { .. } => format!(
-                "field `{}` cannot expose a slice view with `buffer_offset = unknown`: its elements require {}-byte alignment, but the input slice may start at any address",
+                "field `{}` cannot expose a slice view with `buffer_offset = any`: its elements require {}-byte alignment, but the input slice may start at any address",
                 field_ident, align
             ),
         }
@@ -2661,7 +2661,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains(
-            "variable_offset_layout only supports `option = implicit`, `buffer_offset = 0..=7`, and `buffer_offset = unknown`"
+            "variable_offset_layout only supports `option = implicit`, `buffer_offset = 0..=7`, and `buffer_offset = any`"
         ));
     }
 
@@ -2677,7 +2677,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains(
-            "variable_offset_layout requires `buffer_offset = 0..=7` or `buffer_offset = unknown`"
+            "variable_offset_layout requires `buffer_offset = 0..=7` or `buffer_offset = any`"
         ));
     }
 
@@ -2696,7 +2696,7 @@ mod tests {
     }
 
     #[test]
-    fn variable_offset_layout_accepts_unknown_buffer_offset() {
+    fn variable_offset_layout_accepts_any_buffer_offset() {
         let item: syn::ItemStruct = parse_quote! {
             struct Args {
                 value: u64,
@@ -2706,40 +2706,42 @@ mod tests {
             }
         };
 
-        expand_variable_offset_layout("buffer_offset = unknown", &item).unwrap();
+        expand_variable_offset_layout("buffer_offset = any", &item).unwrap();
     }
 
     #[test]
-    fn variable_offset_layout_rejects_dynamic_buffer_offset_identifier() {
+    fn variable_offset_layout_rejects_unsupported_buffer_offset_identifiers() {
         let item: syn::ItemStruct = parse_quote! {
             struct Args {
                 value: u16,
             }
         };
 
-        let error = expand_variable_offset_layout("buffer_offset = dynamic", &item)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("buffer_offset must be an integer in 0..=7 or `unknown`"));
+        for args in ["buffer_offset = dynamic", "buffer_offset = unknown"] {
+            let error = expand_variable_offset_layout(args, &item)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("buffer_offset must be an integer in 0..=7 or `any`"));
+        }
     }
 
     #[test]
-    fn variable_offset_layout_rejects_unknown_borrowed_field_requiring_alignment() {
+    fn variable_offset_layout_rejects_borrowed_field_requiring_alignment_with_any_offset() {
         let item: syn::ItemStruct = parse_quote! {
             struct Args {
                 values: [u64; 2],
             }
         };
 
-        let error = expand_variable_offset_layout("buffer_offset = unknown", &item)
+        let error = expand_variable_offset_layout("buffer_offset = any", &item)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("field `values` cannot be borrowed with `buffer_offset = unknown`"));
+        assert!(error.contains("field `values` cannot be borrowed with `buffer_offset = any`"));
         assert!(error.contains("requires 8-byte alignment"));
     }
 
     #[test]
-    fn variable_offset_layout_rejects_unknown_vec_slice_requiring_alignment() {
+    fn variable_offset_layout_rejects_vec_slice_requiring_alignment_with_any_offset() {
         let item: syn::ItemStruct = parse_quote! {
             struct Args {
                 #[flexible = 1]
@@ -2747,11 +2749,12 @@ mod tests {
             }
         };
 
-        let error = expand_variable_offset_layout("buffer_offset = unknown", &item)
+        let error = expand_variable_offset_layout("buffer_offset = any", &item)
             .unwrap_err()
             .to_string();
-        assert!(error
-            .contains("field `values` cannot expose a slice view with `buffer_offset = unknown`"));
+        assert!(
+            error.contains("field `values` cannot expose a slice view with `buffer_offset = any`")
+        );
         assert!(error.contains("require 2-byte alignment"));
     }
 

@@ -113,7 +113,7 @@
 //! | Attribute | `fixed_offset_layout` | `variable_offset_layout` | Meaning |
 //! |---|---|---|---|
 //! | `buffer_offset = 0..=7` | Struct-level; required. | Struct-level; required. | Declares the known byte offset of the decoded slice from an 8-byte aligned base. The decoder validates that pointer offset, and the macro uses it to decide which borrowed views are alignment-safe. |
-//! | `buffer_offset = unknown` | Struct-level; required alternative. | Struct-level; required alternative. | Use when the slice start address is not known. The decoder skips pointer-offset checking, and the macro rejects borrowed views that need alignment greater than 1. |
+//! | `buffer_offset = any` | Struct-level; required alternative. | Struct-level; required alternative. | Use when the slice can start at any address. The decoder skips pointer-offset checking, and the macro rejects borrowed views that need alignment greater than 1. |
 //! | `option = implicit` | Not supported. | Struct-level; optional. | Backward-compatibility mode for structs without Vec fields. It omits option tags and infers option presence from the total encoded length. |
 //! | `#[capacity = N]` | Field-level; fixed-capacity `Vec<T>` only. | Not supported. | Reserves exactly `N` element slots in fixed-offset storage. The active Vec length may change up to that schema capacity without resizing storage. |
 //! | `#[extendable = N]` | Field-level; final `Vec<T>` only. | Not supported. | Uses an `N`-byte length header (`1..=8`) for a trailing Vec. `N` is length-header width, not capacity. Canonical encoding contains only active elements, while decoding larger trailing storage exposes spare capacity through [`ExtendableVec`]. |
@@ -126,8 +126,8 @@
 //!
 //! | `buffer_offset` | When to use it |
 //! |---|---|
-//! | `unknown` | The struct can start anywhere. Its getters copy values or borrow types with alignment 1.<ul><li>`threshold: u16`</li><li>`authority: Pubkey`</li></ul> |
-//! | `0` through `7` | A getter borrows a type with alignment greater than 1. Use the struct's starting address modulo 8. The macro rejects `unknown` for these fields.<ul><li>`items: Vec<u16>`</li><li>`counters: [u32; 3]`</li></ul> |
+//! | `any` | The struct can start anywhere. Its getters copy values or borrow types with alignment 1.<ul><li>`threshold: u16`</li><li>`authority: Pubkey`</li></ul> |
+//! | `0` through `7` | Use the struct's starting address modulo 8 to guarantee alignment. This also enables [direct mutation](#mutability) of aligned fields in fixed layouts. The following borrowed fields require a numeric offset.<ul><li>`items: Vec<u16>`</li><li>`counters: [u32; 3]`</li></ul> |
 //!
 //! <aside role="note" style="border-inline-start: 4px solid #548ed0; background-color: rgba(84, 142, 208, 0.1); padding: 0.75rem 1rem;">
 //! <strong><span aria-hidden="true">ⓘ</span> How to check alignment</strong>
@@ -142,7 +142,7 @@
 //!   a struct starting at byte 1 puts the first `u16` at byte `1 + 1 + 8 = 10`
 //!   (even, aligned). Starting at byte 0 puts it at byte 9 (odd, misaligned).
 //! - **Packing nested structs.** Two 39-byte entries starting at bytes 8 and 47
-//!   can both use `unknown` if their fields allow it. A child declaring
+//!   can both use `any` if their fields allow it. A child declaring
 //!   `buffer_offset = 0` can start at byte 8, but byte 47 fails its offset check.
 //!
 //! </aside>
@@ -165,8 +165,8 @@
 //!
 //! | Field form in `fixed_offset_layout` | Generated mutable helper | Mutation behavior |
 //! |---|---|---|
-//! | Aligned integer primitives, [`Pubkey`](crate::Pubkey)/`Address`, and fixed-size integer arrays | `&mut T` | Borrows the aligned field directly.<br><br>`*view.amount_mut() += 1;` |
-//! | Unaligned integer primitives or fixed-size integer arrays | [`LayoutCopyMut`] | Exposes `get()` and `set(value)` and writes bytes without creating an invalid `&mut T`.<br><br>`view.amount_mut().set(42);` |
+//! | Integer, [`Pubkey`](crate::Pubkey)/`Address`, or fixed-size integer array with guaranteed alignment | `&mut T` | A numeric `buffer_offset` allows direct writes when the macro can prove the field is aligned. Types with alignment 1, such as `u8` and `Pubkey`, also allow direct writes with `any`.<br><br>`*view.shuttle_id_mut() = 101;` |
+//! | Copyable integer or fixed-size integer array whose alignment cannot be guaranteed | [`LayoutCopyMut`] | With `any`, a field like `shuttle_id: u32` uses `get()` and `set(value)` to copy its bytes. A numeric offset also uses this wrapper if the field's position does not guarantee alignment.<br><br>`view.shuttle_id_mut().set(101);` |
 //! | `bool` | [`LayoutBoolMut`] | Exposes `get()` and `set(bool)` because the encoded form is a backing `u8`.<br><br>`view.enabled_mut().set(true);` |
 //! | Fixed `Option<T>` | [`LayoutOptionMut`] or [`LayoutBoolOptionMut`] | Updates the tag and payload in place; the reserved option slot size does not change.<br><br>`view.authority_mut().set(Some(key));` |
 //! | Trailing flexible `Option<T>` | [`LayoutOptionMut`] or [`LayoutBoolOptionMut`] | `None` resizes storage back to the field offset; `Some` resizes to tag plus payload length.<br><br>`view.delegate_mut().set(None)?;` |

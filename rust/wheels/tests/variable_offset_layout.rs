@@ -10,14 +10,14 @@ use wheels::{
 #[repr(align(8))]
 struct Aligned<const N: usize>([u8; N]);
 
-#[variable_offset_layout(buffer_offset = 0)]
+#[variable_offset_layout(buffer_offset = any)]
 struct PubkeyArgs {
     payer: Address,
     validator: Option<Pubkey>,
     amount: u64,
 }
 
-#[variable_offset_layout(buffer_offset = 0)]
+#[variable_offset_layout(buffer_offset = any)]
 struct RawPubkeyArgs {
     payer: [u8; 32],
     validator: Option<[u8; 32]>,
@@ -59,7 +59,7 @@ fn variable_layout_supports_pubkey_fields() {
     assert_eq!(view.amount(), 200);
 }
 
-#[variable_offset_layout(buffer_offset = 0, option = implicit)]
+#[variable_offset_layout(buffer_offset = any, option = implicit)]
 struct ImplicitPubkeyArgs {
     shuttle_id: u32,
     validator: Option<Pubkey>,
@@ -106,7 +106,7 @@ fn variable_layout_supports_implicit_pubkey_option() {
     assert_eq!(view.amount(), 200);
 }
 
-#[variable_offset_layout(buffer_offset = 0)]
+#[variable_offset_layout(buffer_offset = any)]
 struct PubkeyAfterVecArgs {
     header: u16,
     #[flexible = 1]
@@ -145,7 +145,7 @@ fn variable_layout_computes_pubkey_offset_after_variable_field() {
     assert_eq!(view.checksum(), 0xBEEF);
 }
 
-#[variable_offset_layout(buffer_offset = 0)]
+#[variable_offset_layout(buffer_offset = any)]
 struct AddressVecArgs {
     header: u16,
     #[flexible = 1]
@@ -183,14 +183,14 @@ fn variable_layout_supports_address_vec() {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[fixed_offset_layout(buffer_offset = unknown)]
+#[fixed_offset_layout(buffer_offset = any)]
 struct FixedVerifierEntry {
     verifier_identity: Pubkey,
     verifier_bond: Pubkey,
     weight: u64,
 }
 
-#[variable_offset_layout(buffer_offset = 0)]
+#[variable_offset_layout(buffer_offset = any)]
 struct NestedFixedOptionArgs {
     header: u8,
     config: Option<FixedVerifierEntry>,
@@ -261,7 +261,7 @@ fn variable_layout_rejects_invalid_nested_option_encoding() {
     );
 }
 
-#[variable_offset_layout(buffer_offset = unknown)]
+#[variable_offset_layout(buffer_offset = any)]
 struct FixedEntryRegistryArgs {
     registry_revision: u64,
     #[flexible = 4]
@@ -269,7 +269,7 @@ struct FixedEntryRegistryArgs {
     entries: Vec<FixedVerifierEntry>,
 }
 
-#[variable_offset_layout(buffer_offset = unknown)]
+#[variable_offset_layout(buffer_offset = any)]
 struct FixedEntryRegistryWithChecksumArgs {
     registry_revision: u64,
     #[flexible = 1]
@@ -278,7 +278,7 @@ struct FixedEntryRegistryWithChecksumArgs {
     checksum: u16,
 }
 
-#[variable_offset_layout(buffer_offset = unknown)]
+#[variable_offset_layout(buffer_offset = any)]
 struct TinyFixedEntryRegistryArgs {
     registry_revision: u64,
     #[flexible = 1]
@@ -424,14 +424,14 @@ fn variable_layout_rejects_fixed_size_layout_vec_capacity_overflow() {
     );
 }
 
-#[variable_offset_layout(buffer_offset = unknown)]
+#[variable_offset_layout(buffer_offset = any)]
 struct PrefixEntry {
     id: u16,
     #[flexible = 1]
     payload: Vec<u8>,
 }
 
-#[variable_offset_layout(buffer_offset = unknown)]
+#[variable_offset_layout(buffer_offset = any)]
 struct PrefixEntryRegistryArgs {
     version: u8,
     #[flexible = 1]
@@ -440,7 +440,7 @@ struct PrefixEntryRegistryArgs {
     checksum: u16,
 }
 
-#[variable_offset_layout(buffer_offset = unknown)]
+#[variable_offset_layout(buffer_offset = any)]
 struct PrefixEntryLogArgs {
     #[flexible = 1]
     #[element_size = variable]
@@ -543,7 +543,7 @@ fn variable_layout_rejects_invalid_prefix_layout_vec() {
     );
 }
 
-#[variable_offset_layout(buffer_offset = 0)]
+#[variable_offset_layout(buffer_offset = any)]
 struct PrivateTransferArgs {
     shuttle_id: u32,
     amount: u64,
@@ -619,7 +619,7 @@ fn variable_layout_private_args() {
 }
 
 #[derive(Clone)]
-#[variable_offset_layout(buffer_offset = 0)]
+#[variable_offset_layout(buffer_offset = any)]
 struct VariableOffsetViewArgs {
     header: u16,
     validator: Option<u32>,
@@ -875,7 +875,7 @@ fn variable_offset_layout_supports_four_byte_length_prefixes() {
     assert_eq!(value.encode().unwrap(), bytes.to_vec());
 }
 
-#[variable_offset_layout(buffer_offset = 0)]
+#[variable_offset_layout(buffer_offset = any)]
 struct EightByteFlexibleArgs {
     tag: u8,
     #[flexible = 8]
@@ -1050,8 +1050,8 @@ fn variable_layout_buffer_offset_one_allows_unaligned_copy_only_views() {
     assert_eq!(view.counter(), 7);
 }
 
-#[variable_offset_layout(buffer_offset = unknown)]
-struct UnknownOffsetArgs {
+#[variable_offset_layout(buffer_offset = any)]
+struct AnyOffsetArgs {
     amount: u64,
     enabled: bool,
     authority: Pubkey,
@@ -1062,7 +1062,7 @@ struct UnknownOffsetArgs {
 }
 
 #[test]
-fn variable_layout_unknown_buffer_offset_decodes_copy_and_alignment_one_views() {
+fn variable_layout_any_buffer_offset_decodes_copy_and_alignment_one_views() {
     let mut aligned = Aligned([0; 80]);
     let bytes = &mut aligned.0[1..];
 
@@ -1074,7 +1074,7 @@ fn variable_layout_unknown_buffer_offset_decodes_copy_and_alignment_one_views() 
     bytes[74..77].copy_from_slice(&[4, 5, 6]);
     bytes[77..79].copy_from_slice(&9_u16.to_le_bytes());
 
-    let view = UnknownOffsetArgs::decode(&bytes[..79]).unwrap();
+    let view = AnyOffsetArgs::decode(&bytes[..79]).unwrap();
 
     assert_eq!(view.amount(), 55);
     assert!(view.enabled());
@@ -1085,7 +1085,7 @@ fn variable_layout_unknown_buffer_offset_decodes_copy_and_alignment_one_views() 
 }
 
 #[derive(Clone)]
-#[variable_offset_layout(buffer_offset = 0)]
+#[variable_offset_layout(buffer_offset = any)]
 struct BoolArgs {
     enabled: bool,
     sponsored: Option<bool>,
@@ -1159,7 +1159,7 @@ fn variable_layout_decodes_implicit_option_value_exactly() {
     );
 }
 
-#[variable_offset_layout(buffer_offset = 0, option = implicit)]
+#[variable_offset_layout(buffer_offset = any, option = implicit)]
 struct ImplicitOptionArgs {
     shuttle_id: u32,
     validator: Option<[u8; 32]>,
@@ -1215,7 +1215,7 @@ fn variable_layout_supports_implicit_option_without_tag() {
     assert_eq!(some_view.validator(), Some(&[1; 32]));
 }
 
-#[variable_offset_layout(buffer_offset = 0, option = implicit)]
+#[variable_offset_layout(buffer_offset = any, option = implicit)]
 struct ImplicitOptionWithTrailingArgs {
     header: u16,
     validator: Option<[u8; 4]>,
@@ -1268,7 +1268,7 @@ fn variable_layout_rejects_invalid_implicit_option_length() {
     );
 }
 
-#[variable_offset_layout(buffer_offset = 0, option = implicit)]
+#[variable_offset_layout(buffer_offset = any, option = implicit)]
 struct MultiImplicitOptionArgs {
     amount: u64,
     split: u32,
@@ -1334,7 +1334,7 @@ fn variable_layout_supports_multiple_implicit_options_with_unique_subset_sums() 
     assert_eq!(both_view.client_ref_id(), Some(99));
 }
 
-#[variable_offset_layout(buffer_offset = 0, option = implicit)]
+#[variable_offset_layout(buffer_offset = any, option = implicit)]
 struct ImplicitBoolArgs {
     amount: u16,
     gasless: Option<bool>,
