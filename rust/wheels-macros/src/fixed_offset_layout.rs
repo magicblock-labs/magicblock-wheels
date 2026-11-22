@@ -1183,6 +1183,9 @@ impl FixedFieldKind {
                         FixedVecElementKind::FixedValue(_) => Ok(quote! {
                             pub fn #field_ident(&self) -> &[#elem_ty] {
                                 let len = #len_expr;
+                                if len == 0 {
+                                    return &[];
+                                }
                                 let start = #offset + #len_width_lit;
                                 let end = start + (len * #elem_size);
                                 ::bytemuck::cast_slice::<u8, #elem_ty>(&self.bytes[start..end])

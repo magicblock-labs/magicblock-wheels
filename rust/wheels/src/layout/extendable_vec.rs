@@ -201,6 +201,9 @@ where
 {
     /// Returns the active elements as a borrowed slice.
     pub fn as_slice(&self) -> &'a [T] {
+        if self.is_empty() {
+            return &[];
+        }
         bytemuck::cast_slice(self.active_bytes())
     }
 }
