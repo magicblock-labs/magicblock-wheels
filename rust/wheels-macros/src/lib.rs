@@ -146,8 +146,10 @@ mod variable_offset_layout;
 ///     field. Without `#[flexible]`, `T` must implement `FixedSizeLayout` and
 ///     the field reserves a tag and fixed-size payload. With `#[flexible]`,
 ///     `T` may have a fixed or variable encoded size and must implement
-///     `Encodable`, `Decodable`, and `LayoutBounds`; `None` omits the field and
-///     `Some` uses the actual encoded payload length.
+///     `Encodable`, `PrefixDecodable`, and `LayoutBounds`. A child using
+///     `option = implicit` requires an exact slice and cannot supply the
+///     payload boundary. `None` omits the field and `Some` uses the actual
+///     encoded payload length.
 ///
 /// APIs
 /// ====

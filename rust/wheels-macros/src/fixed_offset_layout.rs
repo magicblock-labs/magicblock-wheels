@@ -750,7 +750,7 @@ impl FixedFieldKind {
                 ty,
                 optional: Optional::Flexible,
             } => Some(
-                quote!(#ty: ::wheels::layout::Encodable + ::wheels::layout::Decodable + ::wheels::layout::LayoutBounds),
+                quote!(#ty: ::wheels::layout::Encodable + ::wheels::layout::PrefixDecodable + ::wheels::layout::LayoutBounds),
             ),
             Self::Vec { elem, .. } => {
                 if elem.needs_pod_bound() {
@@ -1308,12 +1308,11 @@ impl FixedFieldKind {
                 }
             }
             Self::NestedLayoutOption { ty, optional } => {
-                let return_ty = quote!(
-                    core::option::Option<<#ty as ::wheels::layout::Decodable>::View<'a>>
-                );
+                let fixed_view = quote!(<#ty as ::wheels::layout::Decodable>::View<'a>);
+                let flexible_view = quote!(<#ty as ::wheels::layout::PrefixDecodable>::View<'a>);
                 match optional {
                     Optional::Fixed => Ok(quote! {
-                        pub fn #field_ident(&self) -> #return_ty {
+                        pub fn #field_ident(&self) -> core::option::Option<#fixed_view> {
                             (self.bytes[#offset] != 0).then(|| {
                                 let start = #offset + 1usize;
                                 let end = start + <#ty as ::wheels::layout::FixedSizeLayout>::DATA_LEN;
@@ -1323,16 +1322,14 @@ impl FixedFieldKind {
                         }
                     }),
                     Optional::Flexible => Ok(quote! {
-                        pub fn #field_ident(&self) -> #return_ty {
+                        pub fn #field_ident(&self) -> core::option::Option<#flexible_view> {
                             if self.bytes.len() == #offset {
                                 return None;
                             }
-                            Some(
-                                <#ty as ::wheels::layout::Decodable>::decode(
-                                    &self.bytes[#offset + 1usize..],
-                                )
-                                .expect("validated nested flexible Option"),
-                            )
+                            let (child, _) = <#ty as ::wheels::layout::PrefixDecodable>::decode_prefix(
+                                &self.bytes[#offset + 1usize..],
+                            ).expect("validated nested flexible Option");
+                            Some(child)
                         }
                     }),
                 }
