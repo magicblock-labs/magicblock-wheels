@@ -431,9 +431,9 @@ where
     }
 
     fn ensure_capacity(&mut self, len: usize) -> Result<(), ProgramError> {
-        if len > max_len(self.len_width) {
-            return Err(DataLayoutError::LengthExceedsCapacity.into());
-        }
+        let max_spare_elements = max_len(self.len_width)
+            .checked_sub(len)
+            .ok_or(DataLayoutError::LengthExceedsCapacity)?;
 
         let needed_len = self
             .offset
@@ -443,7 +443,8 @@ where
 
         if needed_len > self.storage().len() {
             let elem_size = self.elem_size;
-            self.storage_mut().grow(needed_len, elem_size)?;
+            self.storage_mut()
+                .grow(needed_len, elem_size, max_spare_elements)?;
             self.capacity =
                 storage_capacity(self.storage().len(), self.offset, self.len_width, elem_size)?;
             if self.capacity < len {

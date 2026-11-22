@@ -112,7 +112,7 @@ impl LayoutWriteGuard for TestWriteGuard<'_> {
 }
 
 #[test]
-fn max_len_storage_shrinks_exactly() {
+fn max_len_storage_shrinks_exactly_and_grows_in_steps() {
     let storage = TestStorage::new(vec![0; 9]);
     let max_len_storage = MaxLenStorage::new(&storage, 16, 4);
 
@@ -121,9 +121,15 @@ fn max_len_storage_shrinks_exactly() {
     assert_eq!(storage.resize_lens(), vec![3]);
     assert_eq!(storage.bytes(), vec![0; 3]);
 
-    max_len_storage.resize(16).unwrap();
+    max_len_storage.resize(4).unwrap();
+    assert_eq!(storage.data_len(), 7);
 
-    assert_eq!(storage.resize_lens(), vec![3, 16]);
+    max_len_storage.resize(16).unwrap();
+    assert_eq!(
+        max_len_storage.resize(17).unwrap_err(),
+        ProgramError::from(DataLayoutError::LengthExceedsCapacity)
+    );
+    assert_eq!(storage.resize_lens(), vec![3, 7, 16]);
     assert_eq!(storage.bytes(), vec![0; 16]);
 }
 
@@ -447,6 +453,32 @@ fn max_len_storage_grows_extendable_vec_in_steps_up_to_its_limit() {
     let view = BytePayload::decode(&bytes).unwrap();
     assert_eq!(view.payload().as_slice(), &[1, 2, 3, 4, 5]);
     assert_eq!(view.payload().capacity(), 7);
+
+    // The empty record is 2 bytes. A 256-byte growth step would take it to
+    // 258 bytes, one past the maximum for its one-byte count.
+    let empty = BytePayload {
+        version: 7,
+        payload: vec![],
+    }
+    .encode()
+    .unwrap();
+    let storage = TestStorage::new(empty);
+    let capped = MaxLenStorage::new(&storage, 512, 256);
+    BytePayload::decode_mut(&capped)
+        .unwrap()
+        .payload_mut()
+        .push(42)
+        .unwrap();
+
+    let bytes = storage.bytes();
+    assert_eq!(bytes.len(), BytePayload::MAX_DATA_LEN);
+    let decoded =
+        BytePayload::decode(&bytes).expect("a successful push must leave a readable record");
+    assert_eq!(decoded.payload().as_slice(), &[42]);
+    assert_eq!(decoded.payload().capacity(), u8::MAX as usize);
+    let mut reopened =
+        BytePayload::decode_mut(&capped).expect("the record must also reopen for mutation");
+    assert_eq!(reopened.payload_mut().len(), 1);
 }
 
 #[test]
