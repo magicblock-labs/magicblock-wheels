@@ -813,9 +813,11 @@ impl FixedFieldKind {
         if !multiple_slots || parent == BufferOffset::Any {
             return first;
         }
+        let doc = format!("Field `{field}`");
         let message = format!("field `{field}` has a stride that places its second child at an incompatible buffer offset");
         quote! {
             #first
+            #[doc = #doc]
             const _: () = assert!(
                 <#child as ::wheels::layout::LayoutPlacement>::BUFFER_OFFSET.is_none()
                     || <#child as ::wheels::layout::FixedSizeLayout>::DATA_LEN.is_multiple_of(8),
