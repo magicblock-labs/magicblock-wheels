@@ -1678,10 +1678,11 @@ fn parse_field_attr(
 
             let cap: usize = lit_int.base10_parse()?;
 
-            if cap > MAX_CAPACITY {
+            if !(1..=MAX_CAPACITY).contains(&cap) {
+                let name = field.ident.as_ref().expect("named field");
                 return Err(syn::Error::new(
-                    field.span(),
-                    "capacity above 0xFFFF is not supported for fixed-capacity Vec fields",
+                    lit_int.span(),
+                    format!("field `{name}` requires a capacity in the range 1..={MAX_CAPACITY}"),
                 ));
             }
 
@@ -2001,6 +2002,22 @@ mod tests {
         assert!(error.contains(
             "Vec fields in fixed_offset_layout require `#[capacity = N]` or `#[extendable = N]`"
         ));
+    }
+
+    #[test]
+    fn fixed_offset_layout_rejects_zero_capacity() {
+        let item: syn::ItemStruct = parse_quote! {
+            struct Args {
+                #[capacity = 0]
+                items: Vec<u8>,
+            }
+        };
+
+        let error = expand_fixed_offset_layout("buffer_offset = any", &item).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "field `items` requires a capacity in the range 1..=65535"
+        );
     }
 
     #[test]
