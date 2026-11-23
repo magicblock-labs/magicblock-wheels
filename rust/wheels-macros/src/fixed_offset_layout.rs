@@ -1787,6 +1787,7 @@ fn nested_offset_assertion(
     payload_offset: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     let child_offset = quote!(<#child as ::wheels::layout::LayoutPlacement>::BUFFER_OFFSET);
+    let doc = format!("Field `{field}`");
     let (compatible, message) = match parent {
         BufferOffset::Any => (quote!(#child_offset.is_none()),
             format!("field `{field}` requires a child with `buffer_offset = any` because the parent can start anywhere")),
@@ -1795,7 +1796,10 @@ fn nested_offset_assertion(
             None => true,
         }), format!("field `{field}` places its child at an incompatible buffer offset")),
     };
-    quote! { const _: () = assert!(#compatible, #message); }
+    quote! {
+        #[doc = #doc]
+        const _: () = assert!(#compatible, #message);
+    }
 }
 
 fn bytes_slice_expr(offset: proc_macro2::TokenStream, len: usize) -> proc_macro2::TokenStream {
