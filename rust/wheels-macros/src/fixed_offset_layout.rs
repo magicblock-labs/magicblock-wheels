@@ -1,7 +1,7 @@
 use crate::common::{
-    ensure_allow_dead_code, impl_where_clause, is_bool, is_string, option_inner, parse_value_kind,
-    read_copy_expr, strip_field_attr, usize_lit, vec_inner, AccessMode, BufferOffset,
-    FixedValueKind, MAX_SUPPORTED_VEC_LEN,
+    any_child_placement_assertion, ensure_allow_dead_code, impl_where_clause, is_bool, is_string,
+    option_inner, parse_value_kind, read_copy_expr, strip_field_attr, usize_lit, vec_inner,
+    AccessMode, BufferOffset, FixedValueKind, MAX_SUPPORTED_VEC_LEN,
 };
 use proc_macro2::Span;
 use quote::{format_ident, quote};
@@ -1786,19 +1786,25 @@ fn nested_offset_assertion(
     parent: BufferOffset,
     payload_offset: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    let child_offset = quote!(<#child as ::wheels::layout::LayoutPlacement>::BUFFER_OFFSET);
-    let doc = format!("Field `{field}`");
-    let (compatible, message) = match parent {
-        BufferOffset::Any => (quote!(#child_offset.is_none()),
-            format!("field `{field}` requires a child with `buffer_offset = any` because the parent can start anywhere")),
-        BufferOffset::Fixed(base) => (quote!(match #child_offset {
-            Some(required) => (#base + #payload_offset) % 8 == required,
-            None => true,
-        }), format!("field `{field}` places its child at an incompatible buffer offset")),
+    let BufferOffset::Fixed(base) = parent else {
+        return any_child_placement_assertion(child, field);
     };
+    let doc = format!("Field `{field}`");
+    let message = format!("field `{field}` places its child at an incompatible buffer offset");
     quote! {
         #[doc = #doc]
-        const _: () = assert!(#compatible, #message);
+        const _: () = {
+            let required = <#child as ::wheels::layout::LayoutPlacement>::BUFFER_OFFSET;
+            let actual = (#base + #payload_offset) % 8;
+            let compatible = {
+                use ::core::option::Option::{None, Some};
+                match required {
+                    Some(offset) => actual == offset,
+                    None => true,
+                }
+            };
+            assert!(compatible, #message);
+        };
     }
 }
 

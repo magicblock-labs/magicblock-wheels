@@ -29,9 +29,27 @@ impl BufferOffset {
         };
         quote! {
             impl ::wheels::layout::LayoutPlacement for #ty {
-                const BUFFER_OFFSET: core::option::Option<usize> = #offset;
+                const BUFFER_OFFSET: ::core::option::Option<usize> = {
+                    use ::core::option::Option::*;
+                    #offset
+                };
             }
         }
+    }
+}
+
+pub(crate) fn any_child_placement_assertion(
+    child: &Type,
+    field: &syn::Ident,
+) -> proc_macro2::TokenStream {
+    let doc = format!("Field `{field}`");
+    let message = format!("field `{field}` requires a child with `buffer_offset = any` because the parent can start anywhere");
+    quote! {
+        #[doc = #doc]
+        const _: () = assert!(
+            <#child as ::wheels::layout::LayoutPlacement>::BUFFER_OFFSET.is_none(),
+            #message
+        );
     }
 }
 

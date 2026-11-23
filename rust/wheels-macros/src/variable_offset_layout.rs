@@ -4,9 +4,9 @@ use std::{
 };
 
 use crate::common::{
-    ensure_allow_dead_code, impl_where_clause, is_bool, is_string, option_inner, parse_value_kind,
-    read_copy_expr, strip_field_attr, usize_lit, vec_inner, AccessMode, BufferOffset,
-    FixedValueKind, MAX_SUPPORTED_VEC_LEN,
+    any_child_placement_assertion, ensure_allow_dead_code, impl_where_clause, is_bool, is_string,
+    option_inner, parse_value_kind, read_copy_expr, strip_field_attr, usize_lit, vec_inner,
+    AccessMode, BufferOffset, FixedValueKind, MAX_SUPPORTED_VEC_LEN,
 };
 use proc_macro2::Span;
 use quote::{format_ident, quote};
@@ -69,6 +69,7 @@ pub(crate) fn expand_variable_offset_layout(
 
     let mut where_bounds = Vec::<proc_macro2::TokenStream>::new();
     let mut view_methods = Vec::new();
+    let mut placement_checks = Vec::new();
     let mut validate_steps = Vec::new();
     let mut encoded_len_steps = Vec::new();
     let mut encode_steps = Vec::new();
@@ -110,6 +111,19 @@ pub(crate) fn expand_variable_offset_layout(
         .enumerate()
     {
         let field_ident = field.ident.as_ref().expect("named field");
+
+        if args.buffer_offset == BufferOffset::Any {
+            match field_layout {
+                FieldLayout::FixedLayoutOption { ty }
+                | FieldLayout::Vec {
+                    elem:
+                        VecElementKind::FixedSizeLayout { ty }
+                        | VecElementKind::VariableSizeLayout { ty },
+                    ..
+                } => placement_checks.push(any_child_placement_assertion(ty, field_ident)),
+                _ => {}
+            }
+        }
 
         strip_field_attr(&mut field.attrs, FIELD_ATTRIBUTES);
 
@@ -234,6 +248,7 @@ pub(crate) fn expand_variable_offset_layout(
     Ok(quote! {
         #emitted_input
         #layout_placement
+        #(#placement_checks)*
 
         impl #struct_name {
             const __MIN_DATA_LEN: usize = #min_datalen_expr;

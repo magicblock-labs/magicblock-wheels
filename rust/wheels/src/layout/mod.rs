@@ -319,7 +319,8 @@ pub trait DataLayoutKind {
 /// }
 /// ```
 ///
-/// A parent accepting every address also requires a child accepting every address.
+/// A parent accepting every address also requires its children to accept every
+/// address. For variable-offset layouts, this applies to nested options and vectors.
 ///
 /// ```compile_fail,E0080
 /// # extern crate alloc;
