@@ -808,8 +808,10 @@ impl FixedFieldKind {
             return quote!();
         }
         let ty = value.ty();
+        let doc = format!("Field `{field}`");
         let message = format!("field `{field}` needs padding before its borrowed payload");
         quote! {
+            #[doc = #doc]
             const _: () = assert!((#base + #offset + #header).is_multiple_of(core::mem::align_of::<#ty>()), #message);
         }
     }
