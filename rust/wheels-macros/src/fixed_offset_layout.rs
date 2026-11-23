@@ -92,8 +92,12 @@ pub(crate) fn expand_fixed_offset_layout(
         } = &layout
         {
             let size = elem.size_expr();
+            let doc = format!("Field `{field_ident}`");
             let message = format!("field `{field_ident}` requires a nonzero encoded element size");
-            schema_checks.push(quote! { const _: () = assert!(#size > 0, #message); });
+            schema_checks.push(quote! {
+                #[doc = #doc]
+                const _: () = assert!(#size > 0, #message);
+            });
         }
 
         match layout.check_ref_alignment(offset_value, args.buffer_offset, field_ident) {
