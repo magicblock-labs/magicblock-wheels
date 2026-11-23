@@ -319,6 +319,17 @@ pub trait DataLayoutKind {
 /// }
 /// ```
 ///
+/// A variable-offset parent starting at byte 1 places its tagged child at byte 2.
+///
+/// ```compile_fail,E0080
+/// # extern crate alloc;
+/// use wheels::{fixed_offset_layout, variable_offset_layout};
+/// #[fixed_offset_layout(buffer_offset = 0)]
+/// struct Leaf { value: u8 }
+/// #[variable_offset_layout(buffer_offset = 1)]
+/// struct Middle { leaf: Option<Leaf> }
+/// ```
+///
 /// A parent accepting every address also requires its children to accept every
 /// address. For variable-offset layouts, this applies to nested options and vectors.
 ///

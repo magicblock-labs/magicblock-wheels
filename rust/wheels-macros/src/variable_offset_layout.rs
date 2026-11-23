@@ -123,6 +123,24 @@ pub(crate) fn expand_variable_offset_layout(
                 } => placement_checks.push(any_child_placement_assertion(ty, field_ident)),
                 _ => {}
             }
+        } else if let (BufferOffset::Fixed(base), FieldLayout::FixedLayoutOption { ty }) =
+            (args.buffer_offset, field_layout)
+        {
+            let field_starts = possible_start_residues(&field_layouts[..index], 8);
+            // A present option has one tag byte before the child.
+            let child_offsets = field_starts.iter().map(|start| (base + start + 1) % 8);
+            let doc = format!("Field `{field_ident}`");
+            let message =
+                format!("field `{field_ident}` places its child at an incompatible buffer offset");
+            placement_checks.push(quote! {
+                #[doc = #doc]
+                const _: () = {
+                    use ::core::option::Option::Some;
+                    if let Some(required) = <#ty as ::wheels::layout::LayoutPlacement>::BUFFER_OFFSET {
+                        assert!(#(required == #child_offsets)&&*, #message);
+                    }
+                };
+            });
         }
 
         strip_field_attr(&mut field.attrs, FIELD_ATTRIBUTES);
