@@ -329,6 +329,8 @@ where
             .ok_or(DataLayoutError::LengthExceedsCapacity)?;
         self.ensure_capacity(next_len)?;
 
+        // The constructor checks at compile time that each slot is the size of T.
+        // The byte slice already gives us the exact number of bytes to copy.
         let value_bytes = bytemuck::cast_slice(values);
         let start = self
             .data_start()
