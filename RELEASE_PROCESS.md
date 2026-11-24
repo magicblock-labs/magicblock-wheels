@@ -20,24 +20,36 @@ merged commit once. CI rejects a push that moves an existing release tag.
 
 ## Prepare and publish
 
-1. Branch from `master`. For Rust, update `workspace.package.version` in the root
-   manifest and the exact `wheels-macros` version in `rust/wheels/Cargo.toml`.
-   Run `cargo check --workspace` and include the updated `Cargo.lock`. For npm,
-   run `npm version <version> --no-git-tag-version` in `ts/` and include both JSON files.
-2. Push the branch and open a PR. The corresponding workflow checks the version
-   and dry-runs publication. Cargo builds both packaged crates. npm installs the
-   tarball in a fresh consumer project, compiles its TypeScript, and runs a round trip.
-3. Merge the PR. At the merged commit, create the tag by dropping `release/`
-   from the branch name. For example:
+Start your release branch from `master`.
 
-   ```sh
-   git tag -a npm-v0.4.0-rc.1 <merge-commit> -m 'npm 0.4.0-rc.1'
-   git push origin refs/tags/npm-v0.4.0-rc.1
-   ```
+- **Rust** — `release/rust-v<version>`
 
-   Pushing the tag publishes the package. GitHub Release notes are optional.
-4. If the Rust upload stops between crates, rerun the failed workflow job for the
-   same tag. It looks up both exact versions on crates.io and publishes the missing crate.
+  - Set `workspace.package.version` in the root `Cargo.toml`. In `rust/wheels/Cargo.toml`,
+    pin the `wheels-macros` dependency to that exact version (`=<version>`).
+  - Run `cargo check --workspace` and commit both manifests and the updated `Cargo.lock`.
+  - The release dry run builds both packaged crates.
+  - If an upload stops between crates, rerun the failed job for the same tag.
+    It checks crates.io and publishes the missing crate.
+
+- **npm** — `release/npm-v<version>`
+
+  - In `ts/`, run `npm version <version> --no-git-tag-version`.
+  - Commit the updated `package.json` and `package-lock.json`.
+  - The release dry run installs the tarball in a fresh project, compiles a
+    TypeScript consumer, and checks that it can encode and decode a record.
+
+- **Publish either release**
+
+  - Push the branch and open a PR. Merge it once CI verifies the version and the dry run passes.
+  - Tag the merged commit. Use the branch name with the `release/` prefix removed.
+    For example, to publish the npm release candidate, run
+
+    ```sh
+    git tag -a npm-v0.4.0-rc.1 <merge-commit> -m 'npm 0.4.0-rc.1'
+    git push origin refs/tags/npm-v0.4.0-rc.1
+    ```
+
+  - Pushing the tag publishes the package. GitHub Release notes are optional.
 
 ## Before the first release
 
