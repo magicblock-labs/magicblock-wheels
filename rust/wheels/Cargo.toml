@@ -1,6 +1,8 @@
 [package]
 name = "wheels"
-version = "0.1.0"
+version.workspace = true
+repository.workspace = true
+description = "Zero-copy account layouts and validation helpers for Solana programs"
 edition = "2021"
 
 [dependencies]
@@ -8,4 +10,4 @@ bytemuck = { version = "1", default-features = false }
 pinocchio = { version = "0.10.2", features = ["cpi"] }
 pinocchio-log = "0.5.1"
 solana-address = { version = "2", default-features = false, features = ["bytemuck"] }
-wheels-macros = { path = "../wheels-macros" }
+wheels-macros = { path = "../wheels-macros", version = "=0.1.0" }

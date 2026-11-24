@@ -1,0 +1,65 @@
+name: Release npm package
+
+on:
+  push:
+    branches: ['release/npm-v*']
+    tags: ['npm-v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: ${{ !github.event.deleted }}
+    runs-on: ubuntu-latest
+    outputs:
+      dist_tag: ${{ steps.release.outputs.dist_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: release
+        run: python3 .github/scripts/check_release.py npm "$GITHUB_REF" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: npm ci && npm test -- "$RUNNER_TEMP/wheels.tgz"
+        working-directory: ts
+      - run: npm publish "$RUNNER_TEMP/wheels.tgz" --dry-run --access public ${DIST_TAG:+--tag="$DIST_TAG"}
+        env:
+          DIST_TAG: ${{ steps.release.outputs.dist_tag }}
+      - if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheels-npm
+          path: ${{ runner.temp }}/wheels.tgz
+          if-no-files-found: error
+          overwrite: true
+
+  publish:
+    needs: check
+    if: github.ref_type == 'tag'
+    environment: npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wheels-npm
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm publish ./wheels.tgz --access public ${DIST_TAG:+--tag="$DIST_TAG"}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
+          DIST_TAG: ${{ needs.check.outputs.dist_tag }}

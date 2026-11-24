@@ -1,0 +1,21 @@
+name: Reject unknown release names
+
+# The two publishers validate names with their own prefixes. Catch everything
+# else in the release namespace, including names with extra path segments.
+on:
+  push:
+    branches: ['release', 'release/**', '!release/rust-v*', '!release/npm-v*']
+    tags: ['**', '!rust-v*', '!npm-v*']
+
+permissions: {}
+
+jobs:
+  reject:
+    if: ${{ !github.event.deleted }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report the invalid branch or tag
+        run: |
+          echo "Invalid release ref: $GITHUB_REF" >&2
+          echo "Use a branch such as release/rust-v1.2.3 or release/npm-v1.2.3-rc.1. Drop release/ for the tag." >&2
+          exit 1

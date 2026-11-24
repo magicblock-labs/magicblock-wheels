@@ -1,0 +1,39 @@
+{
+  "name": "@magicblock-labs/wheels",
+  "version": "0.1.0",
+  "description": "Typed binary layouts for Solana account data",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/magicblock-labs/magicblock-wheels.git",
+    "directory": "ts"
+  },
+  "type": "commonjs",
+  "main": "./dist/layout.js",
+  "types": "./dist/layout.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/layout.d.ts",
+      "default": "./dist/layout.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
+    "test": "bash test/packed.sh"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "@types/node": "^22.0.0",
+    "zod": "^3.25.76"
+  },
+  "peerDependencies": {
+    "@solana/web3.js": "^1.98.4"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3"
+  }
+}

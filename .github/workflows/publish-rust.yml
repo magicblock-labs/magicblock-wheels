@@ -1,0 +1,55 @@
+name: Release Rust crates
+
+on:
+  push:
+    branches: ['release/rust-v*']
+    tags: ['rust-v*']
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: '1.90.0'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: ${{ !github.event.deleted }}
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - id: release
+        run: python3 .github/scripts/check_release.py rust "$GITHUB_REF" >> "$GITHUB_OUTPUT"
+      - run: cargo publish --workspace --locked --dry-run
+
+  publish:
+    needs: check
+    if: github.ref_type == 'tag'
+    environment: crates-io
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      BOOTSTRAP: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - id: auth
+        if: env.BOOTSTRAP != 'true'
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+      - run: bash .github/scripts/publish-crates.sh "$VERSION"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN || steps.auth.outputs.token }}
+          VERSION: ${{ needs.check.outputs.version }}
