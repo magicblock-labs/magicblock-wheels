@@ -1,6 +1,8 @@
 [package]
 name = "wheels-macros"
-version = "0.1.0"
+version.workspace = true
+repository.workspace = true
+description = "Procedural macros for the wheels account layout types"
 edition = "2021"
 
 [lib]
