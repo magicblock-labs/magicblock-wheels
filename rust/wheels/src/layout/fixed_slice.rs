@@ -28,6 +28,22 @@ use crate::DataLayoutError;
 /// reserved trailing storage remains part of the parent layout and is exposed
 /// separately through the generated `<field>_capacity()` method.
 ///
+/// In a fixed-offset parent every slot must satisfy the child's declared
+/// offset. With two 39-byte slots, the first starts at byte 8 and the next at 47.
+///
+/// ```compile_fail,E0080
+/// # extern crate alloc;
+/// use wheels::fixed_offset_layout;
+/// #[fixed_offset_layout(buffer_offset = 0)]
+/// struct Child { key: [u8; 32], tag: [u8; 7] }
+/// #[fixed_offset_layout(buffer_offset = 0)]
+/// struct Parent {
+///     pad: [u8; 7],
+///     #[capacity = 2]
+///     entries: Vec<Child>,
+/// }
+/// ```
+///
 #[derive(Clone, Copy, Debug)]
 pub struct FixedLayoutSlice<'a, T>
 where
