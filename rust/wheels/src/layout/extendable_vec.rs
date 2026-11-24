@@ -38,6 +38,32 @@ enum ExtendableVecSource<'a, S: ?Sized> {
 /// reserve more slots. After reopening, `len()` counts active elements and
 /// `capacity()` counts all slots belonging to the field.
 ///
+/// Each slot must occupy at least one byte.
+///
+/// ```compile_fail,E0080
+/// # extern crate alloc;
+/// use wheels::fixed_offset_layout;
+/// #[fixed_offset_layout(buffer_offset = any)]
+/// struct Record {
+///     #[extendable = 1]
+///     items: Vec<[u8; 0]>,
+/// }
+/// ```
+///
+/// The same rule applies to the encoded size of a nested layout.
+///
+/// ```compile_fail,E0080
+/// # extern crate alloc;
+/// use wheels::fixed_offset_layout;
+/// #[fixed_offset_layout(buffer_offset = any)]
+/// struct Empty {}
+/// #[fixed_offset_layout(buffer_offset = any)]
+/// struct Record {
+///     #[extendable = 1]
+///     entries: Vec<Empty>,
+/// }
+/// ```
+///
 /// CHECKPOINT(CU): generated fixed-layout getters pass compile-time constant
 /// offsets and element metadata into this generic helper. They are stored as
 /// runtime fields to keep return types simple. If CU measurements show this
