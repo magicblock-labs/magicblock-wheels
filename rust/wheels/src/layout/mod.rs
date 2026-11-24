@@ -153,8 +153,8 @@
 //! | `any` | The struct can start anywhere. Its getters copy values or borrow types with alignment 1.<ul><li>`threshold: u16`</li><li>`authority: Pubkey`</li></ul> |
 //! | `0` through `7` | Use the struct's starting address modulo 8 to guarantee alignment. This also enables [direct mutation](#mutability) of aligned fields in fixed layouts. The following borrowed fields require a numeric offset.<ul><li>`items: Vec<u16>`</li><li>`counters: [u32; 3]`</li></ul> |
 //!
-//! <aside role="note" style="border-inline-start: 4px solid #548ed0; background-color: rgba(84, 142, 208, 0.1); padding: 0.75rem 1rem;">
-//! <strong><span aria-hidden="true">ⓘ</span> How to check alignment</strong>
+//! <details style="border-inline-start: 4px solid #548ed0; background-color: rgba(84, 142, 208, 0.1); padding: 0.75rem 1rem;">
+//! <summary><strong><span aria-hidden="true">ⓘ</span> How to check alignment</strong></summary>
 //!
 //! A borrowed `T` must start at a multiple of `align_of::<T>()`. For every
 //! possible payload position, `payload_offset` counts all preceding bytes in
@@ -169,7 +169,7 @@
 //!   can both use `any` if their fields allow it. A child declaring
 //!   `buffer_offset = 0` can start at byte 8, but byte 47 fails its offset check.
 //!
-//! </aside>
+//! </details>
 //!
 //! A nested layout's encoded width also contributes to the next field's offset.
 //! Here the count and the single reserved byte put `counters` at byte 2.
@@ -205,8 +205,8 @@
 //! must match the child's starting address modulo eight for every possible
 //! encoding of the preceding fields. A child declaring `any` accepts every address.
 //!
-//! <details>
-//! <summary>Why the one-byte tag matters</summary>
+//! <details style="border-inline-start: 4px solid #548ed0; background-color: rgba(84, 142, 208, 0.1); padding: 0.75rem 1rem;">
+//! <summary><strong><span aria-hidden="true">ⓘ</span> Why the one-byte tag matters</strong></summary>
 //!
 //! Let `p` be the first tag's address. When the first option is `Some`, its
 //! payload starts at `p + 1`. When it is `None` and the second option is
