@@ -8,6 +8,51 @@ use syn::{Attribute, Expr, ExprLit, GenericArgument, Lit, LitInt, PathArguments,
 // would make those bounds overflow instead of being useful API.
 pub(crate) const MAX_SUPPORTED_VEC_LEN: usize = u32::MAX as usize;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BufferOffset {
+    Fixed(usize),
+    Any,
+}
+
+impl BufferOffset {
+    pub(crate) fn value(self) -> Option<usize> {
+        match self {
+            Self::Fixed(value) => Some(value),
+            Self::Any => None,
+        }
+    }
+
+    pub(crate) fn layout_placement_impl(self, ty: &syn::Ident) -> proc_macro2::TokenStream {
+        let offset = match self {
+            Self::Fixed(value) => quote!(Some(#value)),
+            Self::Any => quote!(None),
+        };
+        quote! {
+            impl ::wheels::layout::LayoutPlacement for #ty {
+                const BUFFER_OFFSET: ::core::option::Option<usize> = {
+                    use ::core::option::Option::*;
+                    #offset
+                };
+            }
+        }
+    }
+}
+
+pub(crate) fn any_child_placement_assertion(
+    child: &Type,
+    field: &syn::Ident,
+) -> proc_macro2::TokenStream {
+    let doc = format!("Field `{field}`");
+    let message = format!("field `{field}` requires a child with `buffer_offset = any` because the parent can start anywhere");
+    quote! {
+        #[doc = #doc]
+        const _: () = assert!(
+            <#child as ::wheels::layout::LayoutPlacement>::BUFFER_OFFSET.is_none(),
+            #message
+        );
+    }
+}
+
 pub(crate) enum AccessMode {
     Copy,
     Ref,

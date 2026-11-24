@@ -4,9 +4,9 @@ use std::{
 };
 
 use crate::common::{
-    ensure_allow_dead_code, impl_where_clause, is_bool, is_string, option_inner, parse_value_kind,
-    read_copy_expr, strip_field_attr, usize_lit, vec_inner, AccessMode, FixedValueKind,
-    MAX_SUPPORTED_VEC_LEN,
+    any_child_placement_assertion, ensure_allow_dead_code, impl_where_clause, is_bool, is_string,
+    option_inner, parse_value_kind, read_copy_expr, strip_field_attr, usize_lit, vec_inner,
+    AccessMode, BufferOffset, FixedValueKind, MAX_SUPPORTED_VEC_LEN,
 };
 use proc_macro2::Span;
 use quote::{format_ident, quote};
@@ -36,6 +36,7 @@ pub(crate) fn expand_variable_offset_layout(
     ensure_allow_dead_code(&mut emitted_input.attrs);
 
     let struct_name = &emitted_input.ident;
+    let layout_placement = args.buffer_offset.layout_placement_impl(struct_name);
     let view_name = format_ident!("{}View", struct_name);
     let buffer_offset_validation = match args.buffer_offset {
         BufferOffset::Fixed(buffer_offset) => {
@@ -68,6 +69,7 @@ pub(crate) fn expand_variable_offset_layout(
 
     let mut where_bounds = Vec::<proc_macro2::TokenStream>::new();
     let mut view_methods = Vec::new();
+    let mut placement_checks = Vec::new();
     let mut validate_steps = Vec::new();
     let mut encoded_len_steps = Vec::new();
     let mut encode_steps = Vec::new();
@@ -109,6 +111,63 @@ pub(crate) fn expand_variable_offset_layout(
         .enumerate()
     {
         let field_ident = field.ident.as_ref().expect("named field");
+
+        if args.buffer_offset == BufferOffset::Any {
+            match field_layout {
+                FieldLayout::FixedLayoutOption { ty }
+                | FieldLayout::Vec {
+                    elem:
+                        VecElementKind::FixedSizeLayout { ty }
+                        | VecElementKind::VariableSizeLayout { ty },
+                    ..
+                } => placement_checks.push(any_child_placement_assertion(ty, field_ident)),
+                _ => {}
+            }
+        } else if let (BufferOffset::Fixed(base), FieldLayout::FixedLayoutOption { ty }) =
+            (args.buffer_offset, field_layout)
+        {
+            // Count this child's tag and the earlier headers with all payloads empty.
+            // Adding an optional value or a vector entry must preserve that offset.
+            let mut header_bytes = 1;
+            let mut preceding_payloads = Vec::new();
+            let mut other_fields = Vec::new();
+            for field in &field_layouts[..index] {
+                match field {
+                    FieldLayout::FixedLayoutOption { ty } => {
+                        header_bytes += 1;
+                        preceding_payloads.push(ty);
+                    }
+                    FieldLayout::Vec {
+                        elem: VecElementKind::FixedSizeLayout { ty },
+                        flexible,
+                    } => {
+                        header_bytes += flexible.len_width;
+                        preceding_payloads.push(ty);
+                    }
+                    _ => other_fields.push(field),
+                }
+            }
+            let field_starts = possible_start_residues(other_fields, 8);
+            let child_offsets = field_starts
+                .iter()
+                .map(|start| (base + start + header_bytes) % 8);
+            let doc = format!("Field `{field_ident}`");
+            let message =
+                format!("field `{field_ident}` places its child at an incompatible buffer offset");
+            placement_checks.push(quote! {
+                #[doc = #doc]
+                const _: () = {
+                    use ::core::option::Option::Some;
+                    if let Some(required) = <#ty as ::wheels::layout::LayoutPlacement>::BUFFER_OFFSET {
+                        assert!(#(required == #child_offsets)&&*, #message);
+                        #(assert!(
+                            <#preceding_payloads as ::wheels::layout::FixedSizeLayout>::DATA_LEN.is_multiple_of(8),
+                            #message
+                        );)*
+                    }
+                };
+            });
+        }
 
         strip_field_attr(&mut field.attrs, FIELD_ATTRIBUTES);
 
@@ -232,6 +291,8 @@ pub(crate) fn expand_variable_offset_layout(
 
     Ok(quote! {
         #emitted_input
+        #layout_placement
+        #(#placement_checks)*
 
         impl #struct_name {
             const __MIN_DATA_LEN: usize = #min_datalen_expr;
@@ -1531,12 +1592,6 @@ struct LayoutArgs {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BufferOffset {
-    Fixed(usize),
-    Any,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StructOptionEncoding {
     Tagged,
     Implicit,
@@ -2166,7 +2221,10 @@ fn exact_start_offset(layouts: &[FieldLayout]) -> Option<usize> {
     Some(offset)
 }
 
-fn possible_start_residues(layouts: &[FieldLayout], modulus: usize) -> BTreeSet<usize> {
+fn possible_start_residues<'a>(
+    layouts: impl IntoIterator<Item = &'a FieldLayout>,
+    modulus: usize,
+) -> BTreeSet<usize> {
     let mut residues = BTreeSet::from([0usize]);
     for layout in layouts {
         let len_residues = possible_len_residues(layout, modulus);

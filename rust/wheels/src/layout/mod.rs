@@ -153,8 +153,8 @@
 //! | `any` | The struct can start anywhere. Its getters copy values or borrow types with alignment 1.<ul><li>`threshold: u16`</li><li>`authority: Pubkey`</li></ul> |
 //! | `0` through `7` | Use the struct's starting address modulo 8 to guarantee alignment. This also enables [direct mutation](#mutability) of aligned fields in fixed layouts. The following borrowed fields require a numeric offset.<ul><li>`items: Vec<u16>`</li><li>`counters: [u32; 3]`</li></ul> |
 //!
-//! <aside role="note" style="border-inline-start: 4px solid #548ed0; background-color: rgba(84, 142, 208, 0.1); padding: 0.75rem 1rem;">
-//! <strong><span aria-hidden="true">ⓘ</span> How to check alignment</strong>
+//! <details style="border-inline-start: 4px solid #548ed0; background-color: rgba(84, 142, 208, 0.1); padding: 0.75rem 1rem;">
+//! <summary><strong><span aria-hidden="true">ⓘ</span> How to check alignment</strong></summary>
 //!
 //! A borrowed `T` must start at a multiple of `align_of::<T>()`. For every
 //! possible payload position, `payload_offset` counts all preceding bytes in
@@ -169,7 +169,7 @@
 //!   can both use `any` if their fields allow it. A child declaring
 //!   `buffer_offset = 0` can start at byte 8, but byte 47 fails its offset check.
 //!
-//! </aside>
+//! </details>
 //!
 //! A nested layout's encoded width also contributes to the next field's offset.
 //! Here the count and the single reserved byte put `counters` at byte 2.
@@ -187,6 +187,51 @@
 //!     counters: [u32; 4],
 //! }
 //! ```
+//!
+//! ## Consecutive tagged options
+//!
+//! In a `variable_offset_layout`, each tagged option takes one byte for its
+//! tag and adds its payload only for `Some`. For two adjacent options, use
+//! the getters to determine which payloads need an aligned address.
+//!
+//! | First and second payload | Placement rule |
+//! |---|---|
+//! | Both copied | Any address works for these two fields, e.g. `Option<u64>` followed by `Option<u32>`. |
+//! | Borrowed, then copied | Align the first payload. The second can start at any address. |
+//! | Copied, then borrowed | Align the second payload with the first option set to `None`. The first payload's encoded size must be a multiple of the second payload's alignment so `Some` also works. |
+//! | Both borrowed | If both require alignment greater than one, they cannot be adjacent. Treat an alignment-one borrow like a copy when applying the other rows. |
+//!
+//! For a nested layout, check its declared `buffer_offset`. A numeric offset
+//! must match the child's starting address modulo eight for every possible
+//! encoding of the preceding fields. A child declaring `any` accepts every address.
+//!
+//! <details style="border-inline-start: 4px solid #548ed0; background-color: rgba(84, 142, 208, 0.1); padding: 0.75rem 1rem;">
+//! <summary><strong><span aria-hidden="true">ⓘ</span> Why the one-byte tag matters</strong></summary>
+//!
+//! Let `p` be the first tag's address. When the first option is `Some`, its
+//! payload starts at `p + 1`. When it is `None` and the second option is
+//! `Some`, the second payload starts at `p + 2`. One of these addresses is
+//! odd. If both payloads need even addresses, one of those encodings fails.
+//!
+//! Now consider a parent at byte 0 with `meta: Option<Meta>` followed by
+//! `leaf: Option<Leaf>`. When `leaf` is present, the two tags put its payload at
+//! byte 2 if `meta` is absent, or at `2 + Meta::DATA_LEN` if `meta` is present.
+//! An eight-byte `Meta` gives starts of 2 and 10. Both satisfy the leaf's
+//! declared `buffer_offset = 2`. A seven-byte `Meta` gives starts of 2 and 9,
+//! so the following declaration fails at `leaf`.
+//!
+//! ```compile_fail,E0080
+//! # extern crate alloc;
+//! use wheels::{fixed_offset_layout, variable_offset_layout};
+//! #[fixed_offset_layout(buffer_offset = any)]
+//! struct Meta { stamp: [u8; 7] }
+//! #[fixed_offset_layout(buffer_offset = 2)]
+//! struct Leaf { value: u8 }
+//! #[variable_offset_layout(buffer_offset = 0)]
+//! struct Parent { meta: Option<Meta>, leaf: Option<Leaf> }
+//! ```
+//!
+//! </details>
 //!
 //! # Mutability
 //!
@@ -298,6 +343,56 @@ pub use variable_slice::{VariableLayoutSlice, VariableLayoutSliceIter};
 
 pub trait DataLayoutKind {
     const IS_FIXED: bool;
+}
+
+/// Starting address required by a nested layout, expressed modulo eight.
+/// Both layout macros implement this trait. Handwritten children used in
+/// fixed-offset options must declare their placement as well.
+///
+/// A version byte and an option tag place the child at byte 2 in this parent.
+///
+/// ```compile_fail,E0080
+/// # extern crate alloc;
+/// use wheels::fixed_offset_layout;
+/// #[fixed_offset_layout(buffer_offset = 0)]
+/// struct Child { value: u8 }
+/// #[fixed_offset_layout(buffer_offset = 0)]
+/// struct Parent {
+///     version: u8,
+///     #[flexible]
+///     child: Option<Child>,
+/// }
+/// ```
+///
+/// A variable-offset parent starting at byte 1 places its tagged child at byte 2.
+///
+/// ```compile_fail,E0080
+/// # extern crate alloc;
+/// use wheels::{fixed_offset_layout, variable_offset_layout};
+/// #[fixed_offset_layout(buffer_offset = 0)]
+/// struct Leaf { value: u8 }
+/// #[variable_offset_layout(buffer_offset = 1)]
+/// struct Middle { leaf: Option<Leaf> }
+/// ```
+///
+/// A parent accepting every address also requires its children to accept every
+/// address. For variable-offset layouts, this applies to nested options and vectors.
+///
+/// ```compile_fail,E0080
+/// # extern crate alloc;
+/// use wheels::{fixed_offset_layout, variable_offset_layout};
+/// #[variable_offset_layout(buffer_offset = 2)]
+/// struct Child { value: u8 }
+/// #[fixed_offset_layout(buffer_offset = any)]
+/// struct Parent {
+///     version: u8,
+///     #[flexible]
+///     child: Option<Child>,
+/// }
+/// ```
+pub trait LayoutPlacement {
+    /// `None` accepts every address. `Some(0..=7)` requires that byte offset.
+    const BUFFER_OFFSET: Option<usize>;
 }
 
 pub trait FixedSizeLayout: Encodable + Decodable {

@@ -261,6 +261,51 @@ fn variable_layout_rejects_invalid_nested_option_encoding() {
     );
 }
 
+#[test]
+fn preceding_nested_options_and_vectors_preserve_numeric_child_offset() {
+    #[fixed_offset_layout(buffer_offset = any)]
+    struct Meta {
+        stamp: u64,
+    }
+    #[fixed_offset_layout(buffer_offset = 4)]
+    struct Leaf {
+        pad: [u8; 4],
+        values: [u64; 2],
+    }
+    #[variable_offset_layout(buffer_offset = 0)]
+    struct Parent {
+        meta: Option<Meta>,
+        #[flexible = 2]
+        #[element_size = fixed]
+        entries: Vec<Meta>,
+        leaf: Option<Leaf>,
+    }
+
+    // The two option tags and two-byte count put the first possible leaf at byte 4.
+    for (meta, count, leaf_start) in [
+        (None, 0, 4),
+        (Some(Meta { stamp: 99 }), 0, 12),
+        (None, 2, 20),
+        (Some(Meta { stamp: 99 }), 2, 28),
+    ] {
+        let record = Parent {
+            meta,
+            entries: (0..count).map(|stamp| Meta { stamp }).collect(),
+            leaf: Some(Leaf {
+                pad: [0; 4],
+                values: [11, 12],
+            }),
+        };
+        let mut storage = Aligned([0; 4 + 3 * Meta::DATA_LEN + Leaf::DATA_LEN]);
+        let bytes = &mut storage.0[..leaf_start + Leaf::DATA_LEN];
+        assert!(record.encode_to(bytes).unwrap().is_empty());
+        let view = Parent::decode(bytes).unwrap();
+        let leaf = view.leaf().unwrap();
+        assert_eq!(leaf.bytes(), &bytes[leaf_start..]);
+        assert_eq!(leaf.values(), &[11, 12]);
+    }
+}
+
 #[variable_offset_layout(buffer_offset = any)]
 struct FixedEntryRegistryArgs {
     registry_revision: u64,
