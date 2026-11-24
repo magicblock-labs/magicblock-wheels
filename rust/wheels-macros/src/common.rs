@@ -8,9 +8,15 @@ use syn::{Attribute, Expr, ExprLit, GenericArgument, Lit, LitInt, PathArguments,
 // would make those bounds overflow instead of being useful API.
 pub(crate) const MAX_SUPPORTED_VEC_LEN: usize = u32::MAX as usize;
 
+/// Where the input slice can start relative to an eight-byte boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BufferOffset {
+    /// The starting address must have this remainder modulo eight.
+    ///
+    /// - With `buffer_offset = 2`, a slice can start at byte 2 or 10 of an eight-byte-aligned buffer.
     Fixed(usize),
+
+    /// The slice can start at any address. Borrowed fields must work at every address.
     Any,
 }
 
@@ -53,16 +59,31 @@ pub(crate) fn any_child_placement_assertion(
     }
 }
 
+/// How a read-only getter returns a built-in field value.
 pub(crate) enum AccessMode {
+    /// Copy a value of up to eight bytes out of the buffer, as for `amount: u64`.
     Copy,
+
+    /// Borrow a larger value from the buffer, as for `authority: Pubkey`.
     Ref,
 }
 
+/// The built-in field types for which both macros know the size and alignment.
 #[derive(Clone)]
 pub(crate) enum FixedValueKind {
+    /// A one-byte boolean, as in `enabled: bool`. Zero decodes as false.
     Bool { ty: Type },
+
+    /// A signed or unsigned Rust integer, as in `amount: u64`.
     Integer { ty: Type, size: usize, align: usize },
+
+    /// A 32-byte Solana address, written as `Pubkey` or `Address`.
     Pubkey { ty: Type },
+
+    /// A fixed-length array of integers. The array can also contain other such arrays.
+    ///
+    /// - `nonce: [u8; 32]`
+    /// - `pairs: [[u16; 2]; 4]`
     Array { ty: Type, size: usize, align: usize },
 }
 

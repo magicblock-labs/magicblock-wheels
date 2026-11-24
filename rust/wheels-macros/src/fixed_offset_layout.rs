@@ -20,6 +20,7 @@ const MAX_LEN_WIDTH: usize = 8;
 
 const MAX_CAPACITY: usize = 0xffff;
 
+/// Builds the encoder, decoder, and views from the struct's fixed field offsets.
 pub(crate) fn expand_fixed_offset_layout(
     attr: &str,
     input: &ItemStruct,
@@ -461,32 +462,51 @@ pub(crate) fn expand_fixed_offset_layout(
     })
 }
 
-///
-/// Describes whether Option field has #[flexible] or not.
-///
+/// How a fixed-offset layout stores an `Option<T>` field.
 enum Optional {
-    Fixed,    // no attribute implies fixed
-    Flexible, // #[flexible]
+    /// The default. Both `None` and `Some` reserve one tag byte and a full payload slot.
+    Fixed,
+
+    /// A final `#[flexible]` option stores one tag byte and adds the payload only for `Some`.
+    Flexible,
 }
 
+/// The kind of field the fixed-offset macro found in the user's struct.
 enum FixedFieldKind {
+    /// A built-in value, possibly wrapped in `Option`.
+    ///
+    /// - `enabled: bool`
+    /// - `delegate: Option<Pubkey>`
     Value {
         value: FixedValueKind,
         optional: Option<Optional>,
     },
-    NestedLayoutOption {
-        ty: Type,
-        optional: Optional,
-    },
+
+    /// A final option containing a user-defined layout. Its getter returns `Some(child_view)` or `None`.
+    ///
+    /// - `config: Option<AccountConfig>`
+    NestedLayoutOption { ty: Type, optional: Optional },
+
+    /// A vector with reserved slots. Its attribute selects fixed or growable capacity.
+    ///
+    /// - `#[capacity = 4] recipients: Vec<Pubkey>`
+    /// - `#[extendable = 2] entries: Vec<Entry>`
     Vec {
         elem: FixedVecElementKind,
         capacity: Capacity,
     },
 }
 
+/// How the generated getter reads one fixed-width vector element.
 #[derive(Clone)]
 enum FixedVecElementKind {
+    /// A built-in element. For `Vec<u16>`, the view can borrow the active elements as `&[u16]`.
     FixedValue(FixedValueKind),
+
+    /// A child layout. Each slot takes `Entry::DATA_LEN` bytes and yields an `Entry` view.
+    /// If `Entry` requires a numeric buffer offset, every slot must start at that offset modulo eight.
+    ///
+    /// - An eight-byte `Entry` with `buffer_offset = 2` can occupy consecutive slots at bytes 2 and 10.
     FixedSizeLayout { ty: Type },
 }
 
@@ -534,18 +554,22 @@ struct SlotLen {
     value: Option<usize>,
 }
 
+/// What determines the encoded length of the final field when its size can vary.
 #[derive(Clone)]
 enum ComptimeOptionalLen {
+    /// An extendable vector. Its size includes the count, the capacity, and all reserved slots.
     ArrayLen {
         len_width: usize,
         elem_size: proc_macro2::TokenStream,
     },
+
+    /// A flexible option containing a built-in value. `Option<u16>` takes one or three bytes.
     Option {
         value_size: proc_macro2::TokenStream,
     },
-    NestedLayoutOption {
-        ty: proc_macro2::TokenStream,
-    },
+
+    /// A flexible option containing a child layout. `Some` uses one tag byte followed by the encoded child.
+    NestedLayoutOption { ty: proc_macro2::TokenStream },
 }
 
 impl ComptimeOptionalLen {
@@ -1402,7 +1426,7 @@ impl FixedFieldKind {
                         let max = capacity.max_capacity_lit();
                         (
                             quote!(::wheels::layout::FixedCapacityVec<'_, #elem_ty, #marker>),
-                            quote!(::wheels::layout::FixedCapacityVec::new(&mut self.borrowed, #offset, #len_width, #elem_size, #max)),
+                            quote!(::wheels::layout::FixedCapacityVec::new::<#max, #len_width>(&mut self.borrowed, #offset, #elem_size)),
                         )
                     }
                     Capacity::Extendable { .. } => (
@@ -1607,10 +1631,15 @@ fn parse_args(attr: &str) -> syn::Result<LayoutArgs> {
     Ok(LayoutArgs { buffer_offset })
 }
 
+/// Where a vector's capacity comes from in a fixed-offset layout.
 #[derive(Copy, Clone)]
 enum Capacity {
+    /// The macro picks a count width that fits the declared capacity.
+    /// For example, `#[capacity = 4]` stores a one-byte count followed by four slots.
     Fixed { capacity: usize },
 
+    /// `#[extendable = 2]` stores the count and capacity in two bytes each.
+    /// The stored capacity determines how many slots belong to this record.
     Extendable { len_width: usize },
 }
 
@@ -1669,14 +1698,15 @@ fn max_len_for_width(len_width: usize) -> usize {
     }
 }
 
+/// The attribute written on a vector or option field in a fixed-offset layout.
 enum FieldAttribute {
-    /// #[capacity = N]
+    /// The number of slots requested by `#[capacity = N]`.
     Capacity(usize),
 
-    /// #[extendable = 1..=8]
+    /// The byte width of each header requested by `#[extendable = N]` on a final vector.
     Extendable(usize),
 
-    /// #[flexible]
+    /// `#[flexible]` on a final option lets its encoded size change between `None` and `Some`.
     FlexibleOption,
 }
 

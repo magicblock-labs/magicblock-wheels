@@ -23,6 +23,7 @@ const INTEGER_FIELD_MESSAGE: &str = "field must be an integer primitive or bool"
 
 const MAX_LEN_WIDTH: usize = 8;
 
+/// Builds the encoder, decoder, and read-only view for a variable-offset layout.
 pub(crate) fn expand_variable_offset_layout(
     attr: &str,
     input: &ItemStruct,
@@ -437,15 +438,15 @@ pub(crate) fn expand_variable_offset_layout(
     })
 }
 
+/// How the generated view finds a field in the encoded record.
 #[derive(Clone)]
 enum FieldOffset {
-    // A field gets this value only if there is no variable-len field before it.
-    // Once a variable-len field is seen, all other fields will be VariableOffset.
+    /// Every earlier field has a fixed size, so the macro knows the starting byte.
+    /// For example, a vector immediately after an initial `version: u8` starts at byte 1.
     FixedOffset { offset: usize, layout: FieldLayout },
 
-    // Note that it depends on the order of fields, e.g
-    // if a u64 appears after Vec<u8> (or Option<u16>) field, then it will
-    // be treated as VariableOffset as the offset for this field is fixed anymore.
+    /// An earlier field can change size, so the decoder works out how many bytes to skip.
+    /// For example, the offset of `amount: u64` after a `Vec<u8>` depends on the element count.
     VariableOffset { layout: FieldLayout },
 }
 
@@ -476,25 +477,46 @@ impl Debug for FieldOffset {
     }
 }
 
+/// What a field stores in a variable-offset layout.
 #[derive(Clone)]
 enum FieldLayout {
+    /// A built-in value, possibly wrapped in `Option`.
+    ///
+    /// - `enabled: bool`
+    /// - `delegate: Option<Pubkey>`
     Value {
         value: FixedValueKind,
         optional: OptionalKind,
     },
-    FixedLayoutOption {
-        ty: Type,
-    },
+
+    /// An option containing a fixed-size child layout. `Some` stores the child after the tag.
+    ///
+    /// - `config: Option<AccountConfig>`
+    FixedLayoutOption { ty: Type },
+
+    /// A vector that stores a count followed by exactly that many elements.
+    ///
+    /// - `#[flexible = 1] payload: Vec<u8>` uses a one-byte count.
     Vec {
         elem: VecElementKind,
         flexible: Flexible,
     },
 }
 
+/// How a variable-offset layout reads the elements of a vector.
 #[derive(Clone)]
 enum VecElementKind {
+    /// A built-in type. For example, the getter for `samples: Vec<u16>` returns `&[u16]`.
     FixedValue(FixedValueKind),
+
+    /// A child layout whose entries each occupy `T::DATA_LEN` bytes.
+    ///
+    /// - `#[flexible = 1] #[element_size = fixed] entries: Vec<FixedVerifierEntry>`
     FixedSizeLayout { ty: Type },
+
+    /// A child layout whose entries can differ in size. Decoding one entry finds the next.
+    ///
+    /// - `#[flexible = 1] #[element_size = variable] entries: Vec<PrefixEntry>`
     VariableSizeLayout { ty: Type },
 }
 
@@ -540,10 +562,17 @@ impl VecElementKind {
     }
 }
 
+/// How the decoder knows whether a built-in field is present.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OptionalKind {
+    /// A required field, such as `amount: u64`, is always present.
     No,
+
+    /// The first byte is `0` for `None` or `1` followed by the value for `Some`.
     Tagged,
+
+    /// The decoder infers which options are present from the record length.
+    /// The index identifies this field's bit in the mask computed by the decoder.
     Implicit(usize),
 }
 
@@ -1591,9 +1620,14 @@ struct LayoutArgs {
     buffer_offset: BufferOffset,
 }
 
+/// How the struct's options are encoded, as selected by the layout attribute.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StructOptionEncoding {
+    /// The default. Each option starts with a one-byte tag.
     Tagged,
+
+    /// `option = implicit` omits the tags. Each combination of present options
+    /// must give the record a different length.
     Implicit,
 }
 
@@ -2046,16 +2080,17 @@ fn validate_borrowed_field_alignment(
     Ok(())
 }
 
+/// Which bytes must be aligned so a getter can borrow them.
 #[derive(Clone, Copy)]
 enum BorrowedRequirement {
+    /// For `&T`, the value must be aligned. A tagged option places the value one byte past its tag.
     Value {
         align: usize,
         optional_kind: OptionalKind,
     },
-    Vec {
-        align: usize,
-        len_width: usize,
-    },
+
+    /// For `&[T]`, the first element must be aligned. It starts just after the vector's count.
+    Vec { align: usize, len_width: usize },
 }
 
 impl BorrowedRequirement {
@@ -2309,9 +2344,13 @@ impl FieldAttributes {
     }
 }
 
+/// The `#[element_size]` setting on a vector of user-defined layouts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ElementSize {
+    /// `#[element_size = fixed]` requires every entry to have the same encoded size.
     Fixed,
+
+    /// `#[element_size = variable]` requires each entry to be decodable from the front of a slice.
     Variable,
 }
 
