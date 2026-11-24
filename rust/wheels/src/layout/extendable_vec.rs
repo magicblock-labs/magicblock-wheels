@@ -18,6 +18,19 @@ pub enum FixedValueElement {}
 #[derive(Clone, Copy, Debug)]
 pub enum FixedLayoutElement {}
 
+#[doc(hidden)]
+pub trait EncodedElementWidth<T> {
+    const WIDTH: usize;
+}
+
+impl<T: Pod> EncodedElementWidth<T> for FixedValueElement {
+    const WIDTH: usize = core::mem::size_of::<T>();
+}
+
+impl<T: FixedSizeLayout> EncodedElementWidth<T> for FixedLayoutElement {
+    const WIDTH: usize = T::DATA_LEN;
+}
+
 enum ExtendableVecSource<'a, S: ?Sized> {
     Bytes(&'a [u8]),
     Storage(&'a mut S),
@@ -132,12 +145,21 @@ impl<'a, T> ExtendableVec<'a, T, (), FixedLayoutElement> {
 
 impl<'a, T, S: LayoutWriteGuard, K> ExtendableVec<'a, T, S, K> {
     #[doc(hidden)]
-    pub fn new_storage(
+    pub fn new_storage<const ELEM_SIZE: usize>(
         storage: &'a mut S,
         offset: usize,
         len_width: usize,
-        elem_size: usize,
-    ) -> Self {
+    ) -> Self
+    where
+        K: EncodedElementWidth<T>,
+    {
+        const {
+            assert!(
+                ELEM_SIZE == K::WIDTH,
+                "extendable Vec element width mismatch"
+            )
+        };
+        let elem_size = ELEM_SIZE;
         let (len, capacity) = decode_extendable_vec_header(storage, offset, len_width, elem_size)
             .expect("validated extendable Vec");
         Self {
@@ -307,15 +329,9 @@ where
             .ok_or(DataLayoutError::LengthExceedsCapacity)?;
         self.ensure_capacity(next_len)?;
 
+        // The constructor checks at compile time that each slot is the size of T.
+        // The byte slice already gives us the exact number of bytes to copy.
         let value_bytes = bytemuck::cast_slice(values);
-        let byte_len = values
-            .len()
-            .checked_mul(self.elem_size)
-            .ok_or(DataLayoutError::LengthExceedsCapacity)?;
-        if byte_len != value_bytes.len() {
-            return Err(DataLayoutError::InvalidDataLength.into());
-        }
-
         let start = self
             .data_start()
             .checked_add(
@@ -325,7 +341,7 @@ where
             )
             .ok_or(DataLayoutError::LengthExceedsCapacity)?;
         let end = start
-            .checked_add(byte_len)
+            .checked_add(value_bytes.len())
             .ok_or(DataLayoutError::LengthExceedsCapacity)?;
         self.storage_mut()[start..end].copy_from_slice(value_bytes);
 

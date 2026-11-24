@@ -975,28 +975,44 @@ fn fixed_offset_layout_mutates_trailing_extendable_vec_storage() {
         assert_eq!(tail.capacity(), spare);
     }
 
-    let storage = TestStorage::new(empty);
-    // The 15-byte cap leaves room for two whole u16s after the header.
-    let capped = MaxLenStorage::new(&storage, 15, 7);
-    let mut view = FixedTrailingVecArgs::decode_mut(&capped).unwrap();
+    let next_record = BytePayload {
+        version: 9,
+        payload: vec![42],
+    }
+    .encode()
+    .unwrap();
+    let storage = TestStorage::new([empty.as_slice(), &next_record].concat());
+    // The growth allowance fits the two appended u16s.
+    let capped = MaxLenStorage::new(&storage, 15 + next_record.len(), 7);
+    let mut view = FixedTrailingVecArgs::decode_prefix_mut(&capped).unwrap();
     let mut tail = view.tail_mut();
     assert_eq!((tail.len(), tail.capacity()), (0, 0));
     tail.extend_from_slice(&[0x0102, 0x0304]).unwrap();
     assert_eq!((tail.len(), tail.capacity()), (2, 2));
-    assert_eq!(view.bytes(), [7, 2, 1, 2, 0, 0, 2, 0, 2, 0, 2, 1, 4, 3]);
+    let (record, suffix) = FixedTrailingVecArgs::decode_prefix(view.bytes()).unwrap();
+    assert_eq!(record.tail().as_slice(), &[0x0102, 0x0304]);
+    assert_eq!(suffix, next_record);
+    assert_eq!(
+        BytePayload::decode(suffix).unwrap().payload().as_slice(),
+        &[42]
+    );
+    assert_eq!(
+        view.bytes()[..14],
+        [7, 2, 1, 2, 0, 0, 2, 0, 2, 0, 2, 1, 4, 3]
+    );
     let mut tail = view.tail_mut();
 
     tail.set(1, 0x0506).unwrap();
     assert_eq!(tail.pop().unwrap(), Some(0x0506));
     tail.push(0x0708).unwrap();
-    let decoded = FixedTrailingVecArgs::decode(view.bytes()).unwrap();
+    let (decoded, _) = FixedTrailingVecArgs::decode_prefix(view.bytes()).unwrap();
     assert_eq!(decoded.tail().as_slice(), &[0x0102, 0x0708]);
 
     view.tail_mut().clear().unwrap();
     drop(view);
     let bytes = storage.bytes();
-    let aligned = aligned_copy::<14>(&bytes);
-    let view = FixedTrailingVecArgs::decode(&aligned.0[..bytes.len()]).unwrap();
+    let (view, suffix) = FixedTrailingVecArgs::decode_prefix(&bytes).unwrap();
+    assert_eq!(suffix, next_record);
     assert_eq!((view.tail().len(), view.tail().capacity()), (0, 2));
 }
 
