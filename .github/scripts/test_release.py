@@ -14,7 +14,7 @@ class ReleaseRefTests(unittest.TestCase):
         for ecosystem in ("rust", "npm"):
             for prefix in ("refs/heads/release/", "refs/tags/"):
                 for suffix, version, channel in (
-                    ("", "0.4.0", "latest"),
+                    ("", "0.4.0", ""),
                     ("-alpha.1", "0.4.0-alpha.1", "alpha"),
                     ("-beta.2", "0.4.0-beta.2", "beta"),
                     ("-rc.10", "0.4.0-rc.10", "rc"),

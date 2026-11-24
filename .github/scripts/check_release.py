@@ -21,7 +21,8 @@ def parse_release_ref(ref):
             "or a tag like npm-v1.2.3-rc.1"
         )
     ecosystem, version, channel = match.groups()
-    return ecosystem, version, channel or "latest"
+    # Omitting --tag lets npm reject a stable release that would move latest backwards.
+    return ecosystem, version, channel or ""
 
 
 def check_manifests(ecosystem, version):

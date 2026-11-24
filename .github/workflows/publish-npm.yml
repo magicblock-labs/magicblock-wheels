@@ -31,7 +31,7 @@ jobs:
           package-manager-cache: false
       - run: npm ci && npm test -- "$RUNNER_TEMP/wheels.tgz"
         working-directory: ts
-      - run: npm publish "$RUNNER_TEMP/wheels.tgz" --dry-run --access public --tag "$DIST_TAG"
+      - run: npm publish "$RUNNER_TEMP/wheels.tgz" --dry-run --access public ${DIST_TAG:+--tag="$DIST_TAG"}
         env:
           DIST_TAG: ${{ steps.release.outputs.dist_tag }}
       - if: github.ref_type == 'tag'
@@ -59,7 +59,7 @@ jobs:
           node-version: '24'
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
-      - run: npm publish ./wheels.tgz --access public --tag "$DIST_TAG"
+      - run: npm publish ./wheels.tgz --access public ${DIST_TAG:+--tag="$DIST_TAG"}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
           DIST_TAG: ${{ needs.check.outputs.dist_tag }}
