@@ -7,13 +7,16 @@ To release both, follow both rows. The tags can point to the same commit on `mas
 | --- | --- | --- |
 | `release/rust-v0.4.0` | `rust-v0.4.0` | `wheels-macros` and `wheels` at `0.4.0` |
 | `release/npm-v0.2.1` | `npm-v0.2.1` | `@magicblock-labs/wheels@0.2.1` under `latest` |
-| `release/rust-v0.4.0.alpha.1` | `rust-v0.4.0.alpha.1` | Both crates at `0.4.0-alpha.1` |
-| `release/npm-v0.4.0.rc.1` | `npm-v0.4.0.rc.1` | `@magicblock-labs/wheels@0.4.0-rc.1` under `rc` |
+| `release/rust-v0.4.0-alpha.1` | `rust-v0.4.0-alpha.1` | Both crates at `0.4.0-alpha.1` |
+| `release/npm-v0.4.0-rc.1` | `npm-v0.4.0-rc.1` | `@magicblock-labs/wheels@0.4.0-rc.1` under `rc` |
 
-Both ecosystems accept `alpha.N`, `beta.N`, and `rc.N`. Use a hyphen in manifests,
-as in `0.4.0-rc.1`. Branches and tags accept either `.rc.1` or `-rc.1`. Keep the
-same spelling for the PR and its tag. npm publishes prereleases under their
-channel, so a normal install continues to select the stable version.
+Use the same version string in the manifest, branch, and tag. Both ecosystems
+accept `-alpha.N`, `-beta.N`, and `-rc.N`. npm publishes each prerelease under
+its channel, so a normal install continues to select the stable version.
+
+CI reserves `release/` branches and all Git tags for these formats. A PR that
+bumps an existing package version must use its matching release branch. Tag the
+merged commit once. CI rejects a push that moves an existing release tag.
 
 ## Prepare and publish
 
@@ -28,8 +31,8 @@ channel, so a normal install continues to select the stable version.
    from the branch name. For example:
 
    ```sh
-   git tag -a npm-v0.4.0.rc.1 <merge-commit> -m 'npm 0.4.0-rc.1'
-   git push origin refs/tags/npm-v0.4.0.rc.1
+   git tag -a npm-v0.4.0-rc.1 <merge-commit> -m 'npm 0.4.0-rc.1'
+   git push origin refs/tags/npm-v0.4.0-rc.1
    ```
 
    Pushing the tag publishes the package. GitHub Release notes are optional.
@@ -41,8 +44,9 @@ channel, so a normal install continues to select the stable version.
 - Set the project-approved license in the Rust manifests and npm package before
   releasing each ecosystem. Include the corresponding license text in its packages.
 - Create the `crates-io` and `npm` GitHub environments. Limit deployment to
-  `rust-v*` and `npm-v*` tags respectively, and restrict creation of these tags
-  to release maintainers. Release branches run their checks without registry credentials.
+  `rust-v*` and `npm-v*` tags respectively. Use a GitHub tag ruleset to restrict
+  creation to release maintainers and block updates and deletions. Release
+  branches run their checks without registry credentials.
 - For the first Rust release, set the environment secret `CRATES_IO_BOOTSTRAP_TOKEN`
   to a crates.io token allowed to create both crates. After the release, configure
   both crates to trust this repository's `publish-rust.yml` workflow and `crates-io`

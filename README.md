@@ -22,7 +22,7 @@ For the user-facing SDK, see:
 - `rust/wheels-macros`: proc-macro implementation crate re-exported by `wheels`
 - `ts`: `@magicblock-labs/wheels`, a TypeScript package for encoding and decoding layouts
 
-The Rust crates and npm package have independent versions. See the [release guide](RELEASING.md).
+The Rust crates and npm package have independent versions. See the [release guide](RELEASE_PROCESS.md).
 
 ## Rust workspace
 

@@ -1,30 +1,34 @@
 """Check a release branch or tag before packaging. Print GitHub Actions step outputs."""
 
 import json
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 
 
-def release_version(ecosystem, ref):
+def parse_release_ref(ref):
     number = r"(?:0|[1-9][0-9]*)"
     match = re.fullmatch(
-        rf"refs/(?:heads/release/|tags/){ecosystem}-v({number}\.{number}\.{number})"
-        rf"(?:[.-](alpha|beta|rc)\.({number}))?",
+        rf"refs/(?:heads/release/|tags/)(rust|npm)-v"
+        rf"({number}\.{number}\.{number}(?:-(alpha|beta|rc)\.{number})?)",
         ref,
     )
     if not match:
-        raise SystemExit(f"Invalid {ecosystem} release ref: {ref}")
-    version, channel, sequence = match.groups()
-    if channel:
-        return f"{version}-{channel}.{sequence}", channel
-    return version, "latest"
+        raise SystemExit(
+            f"Invalid release ref {ref!r}. Expected a branch like release/rust-v1.2.3 "
+            "or a tag like npm-v1.2.3-rc.1"
+        )
+    ecosystem, version, channel = match.groups()
+    return ecosystem, version, channel or "latest"
 
 
 def check_manifests(ecosystem, version):
     if ecosystem == "npm":
         package = json.loads(Path("ts/package.json").read_text())
+        if package["name"] != "@magicblock-labs/wheels":
+            raise SystemExit("An npm release must publish @magicblock-labs/wheels")
         packages = [package]
     else:
         metadata = subprocess.check_output(
@@ -43,13 +47,21 @@ def check_manifests(ecosystem, version):
             raise SystemExit(f"Set the approved license for {package['name']} in the release PR")
 
 
+def check_tag(ref, event):
+    if not event["created"]:
+        raise SystemExit(f"Cannot move {ref}: rerun the original workflow to retry a publish")
+    ancestry = subprocess.run(["git", "merge-base", "--is-ancestor", "HEAD", "origin/master"])
+    if ancestry.returncode:
+        raise SystemExit(f"Cannot publish {ref}: the tagged commit must be on master")
+
+
 if __name__ == "__main__":
-    ecosystem, ref = sys.argv[1:]
-    version, channel = release_version(ecosystem, ref)
+    publisher, ref = sys.argv[1:]
+    ecosystem, version, channel = parse_release_ref(ref)
+    if ecosystem != publisher:
+        raise SystemExit(f"{ref} belongs to the {ecosystem} publisher")
     if ref.startswith("refs/tags/"):
-        ancestry = subprocess.run(["git", "merge-base", "--is-ancestor", "HEAD", "origin/master"])
-        if ancestry.returncode:
-            raise SystemExit(f"Cannot publish {ref}: the tagged commit must be on master")
+        check_tag(ref, json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text()))
     check_manifests(ecosystem, version)
     print(f"version={version}")
     print(f"dist_tag={channel}")
