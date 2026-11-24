@@ -101,7 +101,7 @@ mod variable_offset_layout;
 ///   - `#[capacity = N]`
 ///
 ///     - Mandatory for fixed-capacity `Vec<T>` fields.
-///     - Reserves space for exactly `N` elements.
+///     - Reserves space for exactly `N` elements, where `N` must be in `1..=65535`.
 ///     - The encoded Vec length uses a 1-byte header when `N <= 255`, otherwise
 ///       a 2-byte header.
 ///     - Generated views expose an additional `<field>_capacity()` method.

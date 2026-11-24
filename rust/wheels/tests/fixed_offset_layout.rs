@@ -857,17 +857,19 @@ fn trailing_u16_vec_decodes_active_elements_and_spare_capacity() {
     struct SamplesAfterConfigs {
         #[capacity = 1]
         configs: Vec<AccountConfig>,
+        _pad: u8,
         #[capacity = 1]
         reserved_samples: Vec<u16>,
+        _pad_counters: [u8; 2],
+        counters: [u32; 4],
         #[extendable = 2]
         samples: Vec<u16>,
     }
 
-    // The reserved config puts the two u16 payloads at bytes 39 and 45.
-    // An empty vector at either offset can still return a typed empty slice.
     let bytes = Aligned([0; SamplesAfterConfigs::MIN_DATA_LEN]);
-    assert_eq!(SamplesAfterConfigs::OFFSETS, [0, 38, 41]);
+    assert_eq!(SamplesAfterConfigs::OFFSETS, [0, 38, 39, 42, 44, 60]);
     let view = SamplesAfterConfigs::decode(&bytes.0).unwrap();
+    assert_eq!(view.counters(), &[0; 4]);
     assert!(view.reserved_samples().is_empty());
     assert!(view.samples().as_slice().is_empty());
 }

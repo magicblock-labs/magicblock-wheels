@@ -121,11 +121,14 @@ pub(crate) fn expand_fixed_offset_layout(
             }
         }
 
-        validate_steps.push(layout.gen_validate_step(
-            offset_expr.clone(),
-            args.buffer_offset,
-            field_ident,
-        ));
+        if offset_value.is_none() {
+            schema_checks.push(layout.borrowed_alignment_assertion(
+                &offset_expr,
+                args.buffer_offset,
+                field_ident,
+            ));
+        }
+        validate_steps.push(layout.gen_validate_step(offset_expr.clone(), field_ident));
         view_methods.push(layout.gen_view_methods(offset_expr.clone(), field_ident)?);
         view_mut_methods.push(layout.gen_view_mut_methods(
             offset_expr.clone(),
@@ -782,50 +785,62 @@ impl FixedFieldKind {
         }
     }
 
+    fn borrowed_alignment_assertion(
+        &self,
+        offset: &proc_macro2::TokenStream,
+        buffer_offset: BufferOffset,
+        field: &Ident,
+    ) -> proc_macro2::TokenStream {
+        let BufferOffset::Fixed(base) = buffer_offset else {
+            return quote!();
+        };
+        let (value, header) = match self {
+            Self::Value { value, optional } if matches!(value.access_mode(), AccessMode::Ref) => {
+                (value, usize::from(optional.is_some()))
+            }
+            Self::Vec {
+                elem: FixedVecElementKind::FixedValue(value),
+                capacity,
+            } => (value, capacity.header_size()),
+            _ => return quote!(),
+        };
+        if value.align() <= 1 {
+            return quote!();
+        }
+        let ty = value.ty();
+        let doc = format!("Field `{field}`");
+        let message = format!("field `{field}` needs padding before its borrowed payload");
+        quote! {
+            #[doc = #doc]
+            const _: () = assert!((#base + #offset + #header).is_multiple_of(core::mem::align_of::<#ty>()), #message);
+        }
+    }
+
     fn gen_validate_step(
         &self,
         offset: proc_macro2::TokenStream,
-        buffer_offset: BufferOffset,
         field_ident: &Ident,
     ) -> proc_macro2::TokenStream {
         let field_name = field_ident.to_string();
         let offset_expr = quote!((#offset));
         match self {
             Self::Value {
-                value,
                 optional: Some(Optional::Fixed),
-            } => {
-                let alignment_check = value_alignment_check(
-                    value,
-                    quote!(#offset_expr + 1usize),
-                    buffer_offset,
-                    &field_name,
-                );
-                quote! {
-                    Self::__validate_option(bytes, #offset_expr, #field_name)?;
-                    if bytes[#offset_expr] != 0 {
-                        #alignment_check
-                    }
-                }
-            }
+                ..
+            } => quote! {
+                Self::__validate_option(bytes, #offset_expr, #field_name)?;
+            },
             Self::Value {
                 value,
                 optional: Some(Optional::Flexible),
             } => {
                 let value_size = usize_lit(value.size());
-                let alignment_check = value_alignment_check(
-                    value,
-                    quote!(#offset_expr + 1usize),
-                    buffer_offset,
-                    &field_name,
-                );
                 quote! {
                     Self::__validate_option(bytes, #offset_expr, #field_name)?;
                     let end = if bytes[#offset_expr] == 1 {
                         if bytes.len() < Self::MIN_DATA_LEN + #value_size {
                             return Err(::wheels::DataLayoutError::TruncatedPayload);
                         }
-                        #alignment_check
                         Self::MIN_DATA_LEN + #value_size
                     } else {
                         Self::MIN_DATA_LEN
@@ -881,28 +896,6 @@ impl FixedFieldKind {
                         )?;
                     },
                 };
-                let alignment_check = match elem {
-                    FixedVecElementKind::FixedValue(value) if value.align() > 1 => {
-                        if let BufferOffset::Fixed(buffer_offset) = buffer_offset {
-                            let align = usize_lit(value.align());
-                            let buffer_offset = usize_lit(buffer_offset);
-                            quote! {
-                                if len != 0 && (#buffer_offset + #data_offset) % #align != 0 {
-                                    ::pinocchio_log::log!(
-                                        "Invalid alignment for field {} : element data starts at offset {}, expected {}-byte alignment",
-                                        #field_name,
-                                        #data_offset,
-                                        #align,
-                                    );
-                                    return Err(::wheels::DataLayoutError::InvalidFieldAlignment);
-                                }
-                            }
-                        } else {
-                            quote!()
-                        }
-                    }
-                    _ => quote!(),
-                };
                 match capacity {
                     Capacity::Fixed { .. } => {
                         let capacity_lit = capacity.max_capacity_lit();
@@ -915,7 +908,6 @@ impl FixedFieldKind {
                                 );
                                 return Err(::wheels::DataLayoutError::LengthExceedsCapacity);
                             }
-                            #alignment_check
                             #active_layout_validation
                         }
                     }
@@ -924,17 +916,13 @@ impl FixedFieldKind {
                             let (len, capacity) = ::wheels::layout::decode_extendable_vec_header(
                                 bytes, #offset_expr, #len_width_lit, #elem_size,
                             )?;
-                            #alignment_check
                             #active_layout_validation
                             Ok(#data_offset + capacity * #elem_size)
                         }
                     }
                 }
             }
-            Self::Value {
-                value,
-                optional: None,
-            } => value_alignment_check(value, offset_expr, buffer_offset, &field_name),
+            Self::Value { optional: None, .. } => quote!(),
         }
     }
 
@@ -1692,10 +1680,11 @@ fn parse_field_attr(
 
             let cap: usize = lit_int.base10_parse()?;
 
-            if cap > MAX_CAPACITY {
+            if !(1..=MAX_CAPACITY).contains(&cap) {
+                let name = field.ident.as_ref().expect("named field");
                 return Err(syn::Error::new(
-                    field.span(),
-                    "capacity above 0xFFFF is not supported for fixed-capacity Vec fields",
+                    lit_int.span(),
+                    format!("field `{name}` requires a capacity in the range 1..={MAX_CAPACITY}"),
                 ));
             }
 
@@ -1793,34 +1782,6 @@ fn can_mut_borrow_value(
     };
 
     (buffer_offset + offset) % align == 0
-}
-
-fn value_alignment_check(
-    value: &FixedValueKind,
-    offset: proc_macro2::TokenStream,
-    buffer_offset: BufferOffset,
-    field_name: &str,
-) -> proc_macro2::TokenStream {
-    if !matches!(value.access_mode(), AccessMode::Ref) || value.align() <= 1 {
-        return quote!();
-    }
-    let BufferOffset::Fixed(buffer_offset) = buffer_offset else {
-        return quote!();
-    };
-
-    let align = usize_lit(value.align());
-    let buffer_offset = usize_lit(buffer_offset);
-    quote! {
-        if (#buffer_offset + #offset) % #align != 0 {
-            ::pinocchio_log::log!(
-                "Invalid alignment for field {} : payload starts at offset {}, expected {}-byte alignment",
-                #field_name,
-                #offset,
-                #align,
-            );
-            return Err(::wheels::DataLayoutError::InvalidFieldAlignment);
-        }
-    }
 }
 
 fn bytes_slice_expr(offset: proc_macro2::TokenStream, len: usize) -> proc_macro2::TokenStream {
@@ -2043,6 +2004,22 @@ mod tests {
         assert!(error.contains(
             "Vec fields in fixed_offset_layout require `#[capacity = N]` or `#[extendable = N]`"
         ));
+    }
+
+    #[test]
+    fn fixed_offset_layout_rejects_zero_capacity() {
+        let item: syn::ItemStruct = parse_quote! {
+            struct Args {
+                #[capacity = 0]
+                items: Vec<u8>,
+            }
+        };
+
+        let error = expand_fixed_offset_layout("buffer_offset = any", &item).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "field `items` requires a capacity in the range 1..=65535"
+        );
     }
 
     #[test]

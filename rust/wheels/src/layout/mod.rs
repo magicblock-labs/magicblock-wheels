@@ -117,7 +117,7 @@
 //! | `buffer_offset = 0..=7` | Struct-level; required. | Struct-level; required. | Declares the known byte offset of the decoded slice from an 8-byte aligned base. The decoder validates that pointer offset, and the macro uses it to decide which borrowed views are alignment-safe. |
 //! | `buffer_offset = any` | Struct-level; required alternative. | Struct-level; required alternative. | Use when the slice can start at any address. The decoder skips pointer-offset checking, and the macro rejects borrowed views that need alignment greater than 1. |
 //! | `option = implicit` | Not supported. | Struct-level; optional. | Backward-compatibility mode for structs without Vec fields. It omits option tags and infers option presence from the total encoded length. |
-//! | `#[capacity = N]` | Field-level; fixed-capacity `Vec<T>` only. | Not supported. | Reserves exactly `N` element slots in fixed-offset storage. The active Vec length may change up to that schema capacity without resizing storage. |
+//! | `#[capacity = N]` | Field-level; fixed-capacity `Vec<T>` only. | Not supported. | Reserves `N` slots, where `N` must be in `1..=65535`. The active length can range from zero to `N` without resizing storage. |
 //! | `#[extendable = N]` | Field-level; final `Vec<T>` only. | Not supported. | Stores the count and capacity in two `N`-byte headers (`1..=8`). Both headers are present for an empty vector. |
 //! | `#[flexible]` | Field-level; final `Option<T>` only. | Not supported. | Stores a single `00` tag for `None` or `01` followed by the payload for `Some`. |
 //! | `#[flexible = N]` | Not supported; fixed trailing Vecs use `#[extendable = N]`. | Field-level; every `Vec<T>` field. | Uses an `N`-byte length header (`1..=8`) and encodes only active elements. `N` is length-header width, not capacity, and later field offsets are decoded dynamically. |
@@ -170,6 +170,23 @@
 //!   `buffer_offset = 0` can start at byte 8, but byte 47 fails its offset check.
 //!
 //! </aside>
+//!
+//! A nested layout's encoded width also contributes to the next field's offset.
+//! Here the count and the single reserved byte put `counters` at byte 2.
+//! Insert two padding bytes before `counters` to place it at byte 4.
+//!
+//! ```compile_fail,E0080
+//! # extern crate alloc;
+//! use wheels::fixed_offset_layout;
+//! #[fixed_offset_layout(buffer_offset = any)]
+//! struct Entry { value: u8 }
+//! #[fixed_offset_layout(buffer_offset = 0)]
+//! struct Record {
+//!     #[capacity = 1]
+//!     entries: Vec<Entry>,
+//!     counters: [u32; 4],
+//! }
+//! ```
 //!
 //! # Mutability
 //!
