@@ -126,19 +126,31 @@ pub(crate) fn expand_variable_offset_layout(
         } else if let (BufferOffset::Fixed(base), FieldLayout::FixedLayoutOption { ty }) =
             (args.buffer_offset, field_layout)
         {
-            let mut preceding_options = Vec::new();
+            // Count this child's tag and the earlier headers with all payloads empty.
+            // Adding an optional value or a vector entry must preserve that offset.
+            let mut header_bytes = 1;
+            let mut preceding_payloads = Vec::new();
             let mut other_fields = Vec::new();
             for field in &field_layouts[..index] {
                 match field {
-                    FieldLayout::FixedLayoutOption { ty } => preceding_options.push(ty),
+                    FieldLayout::FixedLayoutOption { ty } => {
+                        header_bytes += 1;
+                        preceding_payloads.push(ty);
+                    }
+                    FieldLayout::Vec {
+                        elem: VecElementKind::FixedSizeLayout { ty },
+                        flexible,
+                    } => {
+                        header_bytes += flexible.len_width;
+                        preceding_payloads.push(ty);
+                    }
                     _ => other_fields.push(field),
                 }
             }
-            // Count the preceding nested tags and this child's tag with all earlier
-            // nested options absent. Each present payload must preserve that offset.
-            let tags = preceding_options.len() + 1;
             let field_starts = possible_start_residues(other_fields, 8);
-            let child_offsets = field_starts.iter().map(|start| (base + start + tags) % 8);
+            let child_offsets = field_starts
+                .iter()
+                .map(|start| (base + start + header_bytes) % 8);
             let doc = format!("Field `{field_ident}`");
             let message =
                 format!("field `{field_ident}` places its child at an incompatible buffer offset");
@@ -149,7 +161,7 @@ pub(crate) fn expand_variable_offset_layout(
                     if let Some(required) = <#ty as ::wheels::layout::LayoutPlacement>::BUFFER_OFFSET {
                         assert!(#(required == #child_offsets)&&*, #message);
                         #(assert!(
-                            <#preceding_options as ::wheels::layout::FixedSizeLayout>::DATA_LEN.is_multiple_of(8),
+                            <#preceding_payloads as ::wheels::layout::FixedSizeLayout>::DATA_LEN.is_multiple_of(8),
                             #message
                         );)*
                     }
