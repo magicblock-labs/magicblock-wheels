@@ -5,6 +5,8 @@ mod common;
 mod fixed_offset_layout;
 mod variable_offset_layout;
 
+/// Generates an encoder and read-only and mutable views for a struct whose fields
+/// start at fixed byte offsets. Its final field can still grow or shrink.
 ///
 /// Usage
 /// =====
@@ -193,6 +195,8 @@ pub fn fixed_offset_layout(attr: TokenStream, item: TokenStream) -> TokenStream 
     }
 }
 
+/// Generates an encoder and a read-only view for a struct whose field offsets
+/// can change with the lengths of earlier options and vectors.
 ///
 /// Usage
 /// =====

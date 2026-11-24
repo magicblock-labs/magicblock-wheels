@@ -434,6 +434,7 @@ pub trait Encodable {
     fn encode_to<'a>(&self, out: &'a mut [u8]) -> Result<&'a mut [u8], DataLayoutError>;
 }
 
+/// Implements `Encodable` for a tuple by writing its elements in order to the same buffer.
 macro_rules! impl_tuple_encodable {
     ($($name:ident),+ $(,)?) => {
         impl<$($name),+> Encodable for ($($name,)+)
