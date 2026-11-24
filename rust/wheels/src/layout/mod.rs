@@ -188,6 +188,51 @@
 //! }
 //! ```
 //!
+//! ## Consecutive tagged options
+//!
+//! In a `variable_offset_layout`, each tagged option takes one byte for its
+//! tag and adds its payload only for `Some`. For two adjacent options, use
+//! the getters to determine which payloads need an aligned address.
+//!
+//! | First and second payload | Placement rule |
+//! |---|---|
+//! | Both copied | Any address works for these two fields, e.g. `Option<u64>` followed by `Option<u32>`. |
+//! | Borrowed, then copied | Align the first payload. The second can start at any address. |
+//! | Copied, then borrowed | Align the second payload with the first option set to `None`. The first payload's encoded size must be a multiple of the second payload's alignment so `Some` also works. |
+//! | Both borrowed | If both require alignment greater than one, they cannot be adjacent. Treat an alignment-one borrow like a copy when applying the other rows. |
+//!
+//! For a nested layout, check its declared `buffer_offset`. A numeric offset
+//! must match the child's starting address modulo eight for every possible
+//! encoding of the preceding fields. A child declaring `any` accepts every address.
+//!
+//! <details>
+//! <summary>Why the one-byte tag matters</summary>
+//!
+//! Let `p` be the first tag's address. When the first option is `Some`, its
+//! payload starts at `p + 1`. When it is `None` and the second option is
+//! `Some`, the second payload starts at `p + 2`. One of these addresses is
+//! odd. If both payloads need even addresses, one of those encodings fails.
+//!
+//! Now consider a parent at byte 0 with `meta: Option<Meta>` followed by
+//! `leaf: Option<Leaf>`. When `leaf` is present, the two tags put its payload at
+//! byte 2 if `meta` is absent, or at `2 + Meta::DATA_LEN` if `meta` is present.
+//! An eight-byte `Meta` gives starts of 2 and 10. Both satisfy the leaf's
+//! declared `buffer_offset = 2`. A seven-byte `Meta` gives starts of 2 and 9,
+//! so the following declaration fails at `leaf`.
+//!
+//! ```compile_fail,E0080
+//! # extern crate alloc;
+//! use wheels::{fixed_offset_layout, variable_offset_layout};
+//! #[fixed_offset_layout(buffer_offset = any)]
+//! struct Meta { stamp: [u8; 7] }
+//! #[fixed_offset_layout(buffer_offset = 2)]
+//! struct Leaf { value: u8 }
+//! #[variable_offset_layout(buffer_offset = 0)]
+//! struct Parent { meta: Option<Meta>, leaf: Option<Leaf> }
+//! ```
+//!
+//! </details>
+//!
 //! # Mutability
 //!
 //! Mutability is supported only by

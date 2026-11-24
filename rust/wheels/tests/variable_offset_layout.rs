@@ -261,6 +261,41 @@ fn variable_layout_rejects_invalid_nested_option_encoding() {
     );
 }
 
+#[test]
+fn preceding_optional_layout_preserves_numeric_child_offset() {
+    #[fixed_offset_layout(buffer_offset = any)]
+    struct Meta {
+        stamp: u64,
+    }
+    #[fixed_offset_layout(buffer_offset = 2)]
+    struct Leaf {
+        pad: [u8; 6],
+        values: [u64; 2],
+    }
+    #[variable_offset_layout(buffer_offset = 0)]
+    struct Parent {
+        meta: Option<Meta>,
+        leaf: Option<Leaf>,
+    }
+
+    for (meta, leaf_start) in [(None, 2), (Some(Meta { stamp: 99 }), 10)] {
+        let record = Parent {
+            meta,
+            leaf: Some(Leaf {
+                pad: [0; 6],
+                values: [11, 12],
+            }),
+        };
+        let mut storage = Aligned([0; 2 + Meta::DATA_LEN + Leaf::DATA_LEN]);
+        let bytes = &mut storage.0[..leaf_start + Leaf::DATA_LEN];
+        assert!(record.encode_to(bytes).unwrap().is_empty());
+        let view = Parent::decode(bytes).unwrap();
+        let leaf = view.leaf().unwrap();
+        assert_eq!(leaf.bytes(), &bytes[leaf_start..]);
+        assert_eq!(leaf.values(), &[11, 12]);
+    }
+}
+
 #[variable_offset_layout(buffer_offset = any)]
 struct FixedEntryRegistryArgs {
     registry_revision: u64,

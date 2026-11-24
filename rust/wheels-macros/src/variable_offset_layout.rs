@@ -126,9 +126,19 @@ pub(crate) fn expand_variable_offset_layout(
         } else if let (BufferOffset::Fixed(base), FieldLayout::FixedLayoutOption { ty }) =
             (args.buffer_offset, field_layout)
         {
-            let field_starts = possible_start_residues(&field_layouts[..index], 8);
-            // A present option has one tag byte before the child.
-            let child_offsets = field_starts.iter().map(|start| (base + start + 1) % 8);
+            let mut preceding_options = Vec::new();
+            let mut other_fields = Vec::new();
+            for field in &field_layouts[..index] {
+                match field {
+                    FieldLayout::FixedLayoutOption { ty } => preceding_options.push(ty),
+                    _ => other_fields.push(field),
+                }
+            }
+            // Count the preceding nested tags and this child's tag with all earlier
+            // nested options absent. Each present payload must preserve that offset.
+            let tags = preceding_options.len() + 1;
+            let field_starts = possible_start_residues(other_fields, 8);
+            let child_offsets = field_starts.iter().map(|start| (base + start + tags) % 8);
             let doc = format!("Field `{field_ident}`");
             let message =
                 format!("field `{field_ident}` places its child at an incompatible buffer offset");
@@ -138,6 +148,10 @@ pub(crate) fn expand_variable_offset_layout(
                     use ::core::option::Option::Some;
                     if let Some(required) = <#ty as ::wheels::layout::LayoutPlacement>::BUFFER_OFFSET {
                         assert!(#(required == #child_offsets)&&*, #message);
+                        #(assert!(
+                            <#preceding_options as ::wheels::layout::FixedSizeLayout>::DATA_LEN.is_multiple_of(8),
+                            #message
+                        );)*
                     }
                 };
             });
@@ -2195,7 +2209,10 @@ fn exact_start_offset(layouts: &[FieldLayout]) -> Option<usize> {
     Some(offset)
 }
 
-fn possible_start_residues(layouts: &[FieldLayout], modulus: usize) -> BTreeSet<usize> {
+fn possible_start_residues<'a>(
+    layouts: impl IntoIterator<Item = &'a FieldLayout>,
+    modulus: usize,
+) -> BTreeSet<usize> {
     let mut residues = BTreeSet::from([0usize]);
     for layout in layouts {
         let len_residues = possible_len_residues(layout, modulus);
