@@ -40,7 +40,7 @@ jobs:
       contents: read
       id-token: write
     env:
-      BOOTSTRAP: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN != '' }}
+      BOOTSTRAP: ${{ secrets.CRATES_TOKEN != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -51,5 +51,5 @@ jobs:
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
       - run: bash .github/scripts/publish-crates.sh "$VERSION"
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN || steps.auth.outputs.token }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_TOKEN || steps.auth.outputs.token }}
           VERSION: ${{ needs.check.outputs.version }}
