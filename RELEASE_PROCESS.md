@@ -59,11 +59,11 @@ Start your release branch from `master`.
   `rust-v*` and `npm-v*` tags respectively. Use a GitHub tag ruleset to restrict
   creation to release maintainers and block updates and deletions. Release
   branches run their checks without registry credentials.
-- For the first Rust release, set the environment secret `CRATES_IO_BOOTSTRAP_TOKEN`
+- For the first Rust release, set the repository secret `CRATES_TOKEN`
   to a crates.io token allowed to create both crates. After the release, configure
   both crates to trust this repository's `publish-rust.yml` workflow and `crates-io`
   environment, then remove and revoke the bootstrap token.
-- For the first npm release, set `NPM_BOOTSTRAP_TOKEN` in the `npm` environment
+- For the first npm release, set the repository secret `NPM_TOKEN`
   to a short-lived granular token authorized to create a public package in
   `@magicblock-labs` and publish from CI. Once the package exists, configure npm
   to trust `publish-npm.yml` and the `npm` environment, allow direct publishing,
