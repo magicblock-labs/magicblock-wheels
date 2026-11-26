@@ -217,8 +217,12 @@ pub(crate) fn expand_fixed_offset_layout(
                     S: ::wheels::layout::LayoutStorageMut + ?Sized,
                 {
                     let borrowed = storage.borrow_data_mut()?;
-                    Self::__validate_prefix(&borrowed)?;
-                    Ok(#view_mut_name { borrowed })
+                    let end = Self::__validate_prefix(&borrowed)?;
+                    let covers_entire_storage = end == borrowed.len();
+                    Ok(#view_mut_name {
+                        borrowed,
+                        covers_entire_storage,
+                    })
                 }
             },
         ),
@@ -322,7 +326,10 @@ pub(crate) fn expand_fixed_offset_layout(
             <Self as ::wheels::layout::Decodable>::decode(&borrowed)
                 .map_err(::pinocchio::error::ProgramError::from)?;
 
-            Ok(#view_mut_name { borrowed })
+            Ok(#view_mut_name {
+                borrowed,
+                covers_entire_storage: true,
+            })
         }
     };
     let view_mut_bounds = where_bounds.iter();
@@ -333,6 +340,7 @@ pub(crate) fn expand_fixed_offset_layout(
             S: ::wheels::layout::LayoutStorageMut + ?Sized + 'a,
         {
             borrowed: S::RefMut<'a>,
+            covers_entire_storage: bool,
         }
 
         impl<'a, S: ::wheels::layout::LayoutStorageMut + ?Sized> core::fmt::Debug for #view_mut_name<'a, S> {
@@ -353,6 +361,22 @@ pub(crate) fn expand_fixed_offset_layout(
 
             pub fn storage_len(&self) -> usize {
                 self.borrowed.len()
+            }
+
+            /// Reads the validated record through an immutable view.
+            ///
+            /// Views created by `decode_mut()` reuse the existing validation.
+            /// Prefix views with following records validate the first record
+            /// again only to find its current boundary.
+            pub fn as_view(&self) -> #view_name<'_> {
+                let bytes = if self.covers_entire_storage {
+                    &self.borrowed[..]
+                } else {
+                    let end = #struct_name::__validate_prefix(&self.borrowed)
+                        .expect("mutable layout view remains valid");
+                    &self.borrowed[..end]
+                };
+                #view_name { bytes }
             }
 
             #(#view_mut_methods)*

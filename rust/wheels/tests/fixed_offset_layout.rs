@@ -812,6 +812,12 @@ fn fixed_offset_layout_mutates_fixed_fields_and_fixed_capacity_vec() {
     let storage = TestStorage::new(encoded);
     let mut view = PrivateTransferFixedArgs::decode_mut(&storage).unwrap();
     assert_eq!(view.storage_len(), PrivateTransferFixedArgs::DATA_LEN);
+    {
+        let read = view.as_view();
+        assert_eq!(read.shuttle_id(), 100);
+        assert_eq!(read.amount(), 200);
+        assert_eq!(read.validator(), Some(&[1; 32]));
+    }
 
     *view.shuttle_id_mut() = 101;
     *view.checksum_mut() = 0xCAFE;
@@ -837,6 +843,12 @@ fn fixed_offset_layout_mutates_fixed_fields_and_fixed_capacity_vec() {
     recipients.set(0, Address::from([2; 32])).unwrap();
     recipients.truncate(1).unwrap();
     recipients.push(Address::from([4; 32])).unwrap();
+    {
+        let read = view.as_view();
+        assert_eq!(read.shuttle_id(), 101);
+        assert_eq!(read.amount(), 202);
+        assert_eq!(read.validator(), Some(&[3; 32]));
+    }
     drop(view);
 
     let bytes = storage.bytes();
@@ -989,6 +1001,11 @@ fn fixed_offset_layout_mutates_trailing_extendable_vec_storage() {
     assert_eq!((tail.len(), tail.capacity()), (0, 0));
     tail.extend_from_slice(&[0x0102, 0x0304]).unwrap();
     assert_eq!((tail.len(), tail.capacity()), (2, 2));
+    {
+        let read = view.as_view();
+        assert_eq!(read.bytes().len(), 14);
+        assert_eq!(read.tail().as_slice(), &[0x0102, 0x0304]);
+    }
     let (record, suffix) = FixedTrailingVecArgs::decode_prefix(view.bytes()).unwrap();
     assert_eq!(record.tail().as_slice(), &[0x0102, 0x0304]);
     assert_eq!(suffix, next_record);
