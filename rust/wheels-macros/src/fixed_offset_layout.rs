@@ -316,6 +316,18 @@ pub(crate) fn expand_fixed_offset_layout(
         }
     };
     let decode_mut_fn = quote! {
+        /// Creates an immutable view without validating the encoded layout.
+        ///
+        /// # Safety
+        ///
+        /// `bytes` must contain exactly one valid record of this layout. Its
+        /// address must satisfy the declared `buffer_offset`, and every encoded
+        /// tag, length, capacity, nested layout, and field boundary must be valid.
+        #[inline(always)]
+        pub unsafe fn decode_unchecked(bytes: &[u8]) -> #view_name<'_> {
+            #view_name { bytes }
+        }
+
         pub fn decode_mut<'a, S>(
             storage: &'a S,
         ) -> core::result::Result<#view_mut_name<'a, S>, ::pinocchio::error::ProgramError>
@@ -328,6 +340,28 @@ pub(crate) fn expand_fixed_offset_layout(
 
             Ok(#view_mut_name {
                 borrowed,
+                covers_entire_storage: true,
+            })
+        }
+
+        /// Creates a mutable view without validating the encoded layout.
+        ///
+        /// This still acquires and holds the storage's exclusive borrow.
+        ///
+        /// # Safety
+        ///
+        /// The storage must contain exactly one valid record of this layout. Its
+        /// address must satisfy the declared `buffer_offset`, and every encoded
+        /// tag, length, capacity, nested layout, and field boundary must be valid.
+        #[inline(always)]
+        pub unsafe fn decode_mut_unchecked<'a, S>(
+            storage: &'a S,
+        ) -> core::result::Result<#view_mut_name<'a, S>, ::pinocchio::error::ProgramError>
+        where
+            S: ::wheels::layout::LayoutStorageMut + ?Sized,
+        {
+            Ok(#view_mut_name {
+                borrowed: storage.borrow_data_mut()?,
                 covers_entire_storage: true,
             })
         }

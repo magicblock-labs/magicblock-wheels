@@ -865,6 +865,33 @@ fn fixed_offset_layout_mutates_fixed_fields_and_fixed_capacity_vec() {
     assert_eq!(view.checksum(), 0xCAFE);
 }
 
+#[test]
+fn fixed_offset_layout_supports_unchecked_read_and_mutable_views() {
+    let encoded = PrivateTransferFixedArgs::example().encode().unwrap();
+    let aligned = aligned_copy::<{ PrivateTransferFixedArgs::DATA_LEN }>(&encoded);
+
+    // SAFETY: `aligned` contains one freshly encoded record at offset zero.
+    let view = unsafe { PrivateTransferFixedArgs::decode_unchecked(&aligned.0) };
+    assert_eq!(view.shuttle_id(), 100);
+    assert_eq!(view.amount(), 200);
+    assert_eq!(view.validator(), Some(&[1; 32]));
+
+    let storage = TestStorage::new(encoded);
+    // SAFETY: `storage` contains one freshly encoded record at offset zero.
+    let mut view = unsafe { PrivateTransferFixedArgs::decode_mut_unchecked(&storage).unwrap() };
+    *view.shuttle_id_mut() = 101;
+    view.amount_mut().set(202);
+    *view.checksum_mut() = 0xCAFE;
+    drop(view);
+
+    let bytes = storage.bytes();
+    let aligned = aligned_copy::<{ PrivateTransferFixedArgs::DATA_LEN }>(&bytes);
+    let view = PrivateTransferFixedArgs::decode(&aligned.0).unwrap();
+    assert_eq!(view.shuttle_id(), 101);
+    assert_eq!(view.amount(), 202);
+    assert_eq!(view.checksum(), 0xCAFE);
+}
+
 // The layout needs a known offset to borrow `tail` as `&[u16]`. Its first
 // element is 10 bytes into the struct, so offset 0 gives it an even address.
 #[fixed_offset_layout(buffer_offset = 0)]

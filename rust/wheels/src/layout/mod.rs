@@ -262,6 +262,12 @@
 //! mutable view to borrow the storage independently. A failed resize leaves the
 //! view usable.
 //!
+//! Generated fixed layouts also provide unsafe `decode_unchecked(bytes)` and
+//! `decode_mut_unchecked(storage)` fast paths. They skip all layout validation;
+//! the caller must guarantee the complete record, placement, tags, lengths,
+//! capacities, nested layouts, and field boundaries are valid. The mutable form
+//! still acquires and holds the storage's exclusive borrow.
+//!
 //! | Field form in `fixed_offset_layout` | Generated mutable helper | Mutation behavior |
 //! |---|---|---|
 //! | Integer, [`Pubkey`](crate::Pubkey)/`Address`, or fixed-size integer array with guaranteed alignment | `&mut T` | A numeric `buffer_offset` allows direct writes when the macro can prove the field is aligned. Types with alignment 1, such as `u8` and `Pubkey`, also allow direct writes with `any`.<br><br>`*view.shuttle_id_mut() = 101;` |
