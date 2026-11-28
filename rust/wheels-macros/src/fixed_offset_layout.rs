@@ -399,7 +399,8 @@ pub(crate) fn expand_fixed_offset_layout(
 
             /// Reads the record through an immutable view.
             ///
-            /// Whole-storage views reuse the validation performed by `decode_mut()`.
+            /// When the view covers the whole buffer, `as_view()` reads the record
+            /// without validating it again.
             /// Prefix views with following records validate the first record
             /// again only to find its current boundary.
             ///
