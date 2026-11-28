@@ -72,6 +72,20 @@ where
         })
     }
 
+    /// Creates a view without validating its element boundaries or contents.
+    ///
+    /// # Safety
+    ///
+    /// `bytes` must contain only fully validated, consecutive `T` records.
+    #[doc(hidden)]
+    #[inline(always)]
+    pub unsafe fn new_unchecked(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            _marker: core::marker::PhantomData,
+        }
+    }
+
     pub fn as_bytes(&self) -> &'a [u8] {
         self.bytes
     }
