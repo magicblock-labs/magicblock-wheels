@@ -1,5 +1,5 @@
 use proc_macro2::Span;
-use quote::{quote, ToTokens};
+use quote::quote;
 use syn::{Attribute, Expr, ExprLit, GenericArgument, Lit, LitInt, PathArguments, Type, TypePath};
 
 // An 8-byte flexible length header can encode far beyond practical account
@@ -308,27 +308,6 @@ pub(crate) fn usize_lit(value: usize) -> LitInt {
     LitInt::new(&value.to_string(), Span::call_site())
 }
 
-fn parse_integer_expr(
-    ty: &Type,
-    bytes_expr: proc_macro2::TokenStream,
-    error_message: &str,
-) -> syn::Result<proc_macro2::TokenStream> {
-    let Some(name) = integer_primitive_name(ty) else {
-        return Err(syn::Error::new_spanned(ty, error_message));
-    };
-    let ty_tokens = ty.to_token_stream();
-    Ok(match name.as_str() {
-        "i8" => quote!(i8::from_le_bytes([(#bytes_expr)[0]])),
-        "u8" => quote!(u8::from_le_bytes([(#bytes_expr)[0]])),
-        _ => quote!({
-            let raw: [u8; core::mem::size_of::<#ty_tokens>()] = (#bytes_expr)
-                .try_into()
-                .expect("validated slice length");
-            <#ty_tokens>::from_le_bytes(raw)
-        }),
-    })
-}
-
 fn integer_size_and_align(ty: &Type) -> Option<(usize, usize)> {
     match integer_primitive_name(ty).as_deref() {
         Some("i8" | "u8") => Some((1, 1)),
@@ -371,25 +350,4 @@ fn fixed_array_size_and_align(
     };
 
     Ok((len * elem_size, elem_align))
-}
-
-pub(crate) fn read_copy_expr(
-    value: &FixedValueKind,
-    bytes_expr: proc_macro2::TokenStream,
-    layout_name: &str,
-    integer_error_message: &str,
-) -> syn::Result<proc_macro2::TokenStream> {
-    match value {
-        FixedValueKind::Bool { .. } => Ok(quote!((#bytes_expr)[0] != 0)),
-        FixedValueKind::Integer { ty, .. } => {
-            parse_integer_expr(ty, bytes_expr, integer_error_message)
-        }
-        FixedValueKind::Array { ty, .. } => Ok(quote! {
-            unsafe { core::ptr::read_unaligned((#bytes_expr).as_ptr().cast::<#ty>()) }
-        }),
-        FixedValueKind::Pubkey { .. } => Err(syn::Error::new_spanned(
-            value.ty(),
-            format!("Pubkey fields are borrowed by {layout_name}"),
-        )),
-    }
 }
