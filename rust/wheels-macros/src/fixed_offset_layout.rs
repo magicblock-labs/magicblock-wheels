@@ -135,17 +135,22 @@ pub(crate) fn expand_fixed_offset_layout(
                 field_ident,
             ));
         }
-        validate_steps.push(layout.gen_validate_step(offset_expr.clone(), field_ident));
-        view_methods.push(layout.gen_view_methods(offset_expr.clone(), field_ident)?);
+        let field_offset = offset_value
+            .map(|offset| {
+                let offset = usize_lit(offset);
+                quote!(#offset)
+            })
+            .unwrap_or_else(|| offset_expr.clone());
+        validate_steps.push(layout.gen_validate_step(field_offset.clone(), field_ident));
+        view_methods.push(layout.gen_view_methods(field_offset.clone(), field_ident)?);
         view_mut_methods.push(layout.gen_view_mut_methods(
-            offset_expr.clone(),
+            field_offset.clone(),
             offset_value,
             args.buffer_offset,
             field_ident,
         ));
 
-        fields_encode_expr =
-            layout.gen_field_encode(fields_encode_expr, offset_expr.clone(), field_ident);
+        fields_encode_expr = layout.gen_field_encode(fields_encode_expr, field_offset, field_ident);
 
         if let Some(bound) = layout.bound() {
             where_bounds.push(bound);
