@@ -257,8 +257,16 @@
 //! `decode_mut` takes one exclusive borrow and validates its bytes. Each
 //! `<field>_mut()` borrows from that view. After the last use of a field handle,
 //! you can edit another field or resize a trailing field through the same view.
-//! Use `view.bytes()` to inspect the buffer, or drop the view to borrow the
-//! storage independently. A failed resize leaves the view usable.
+//! Use `view.as_view()` for normal read access without decoding exact storage
+//! again. Use `view.bytes()` to inspect the full backing buffer, or drop the
+//! mutable view to borrow the storage independently. A failed resize leaves the
+//! view usable.
+//!
+//! Generated fixed layouts also provide unsafe `decode_unchecked(bytes)` and
+//! `decode_mut_unchecked(storage)` fast paths. They skip all layout validation;
+//! the caller must guarantee the complete record, placement, tags, lengths,
+//! capacities, nested layouts, and field boundaries are valid. The mutable form
+//! still acquires and holds the storage's exclusive borrow.
 //!
 //! | Field form in `fixed_offset_layout` | Generated mutable helper | Mutation behavior |
 //! |---|---|---|

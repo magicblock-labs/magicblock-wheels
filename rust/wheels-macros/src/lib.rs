@@ -170,6 +170,9 @@ mod variable_offset_layout;
 /// Methods:
 ///   - all layouts emit `decode_mut(storage: &impl LayoutStorageMut)`,
 ///     returning a view that holds the exclusive data borrow
+///   - all layouts emit unsafe `decode_unchecked(bytes)` and
+///     `decode_mut_unchecked(storage)` fast paths for storage whose complete
+///     layout validity is already guaranteed by the caller
 ///   - layouts ending in an extendable vector also emit `decode_prefix_mut(storage)`
 ///     to mutate the first record of a shared buffer and preserve subsequent bytes
 ///   - mutable views expose `<field>_mut()` helpers. A plain POD field returns
