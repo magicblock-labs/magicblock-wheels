@@ -211,10 +211,10 @@ pub(crate) fn expand_fixed_offset_layout(
                 /// Borrows storage to mutate its first record. Growing the vector moves
                 /// any following bytes after the newly reserved slots.
                 /// The view's `bytes()` and `storage_len()` cover the entire backing storage.
-                pub fn decode_prefix_mut<'a, S>(storage: &'a S)
-                    -> core::result::Result<#view_mut_name<'a, S>, ::pinocchio::error::ProgramError>
+                pub fn decode_prefix_mut<'a, __WheelsStorage>(storage: &'a __WheelsStorage)
+                    -> core::result::Result<#view_mut_name<'a, __WheelsStorage>, ::pinocchio::error::ProgramError>
                 where
-                    S: ::wheels::layout::LayoutStorageMut + ?Sized,
+                    __WheelsStorage: ::wheels::layout::LayoutStorageMut + ?Sized,
                 {
                     let borrowed = storage.borrow_data_mut()?;
                     let end = Self::__validate_prefix(&borrowed)?;
@@ -328,11 +328,11 @@ pub(crate) fn expand_fixed_offset_layout(
             #view_name { bytes }
         }
 
-        pub fn decode_mut<'a, S>(
-            storage: &'a S,
-        ) -> core::result::Result<#view_mut_name<'a, S>, ::pinocchio::error::ProgramError>
+        pub fn decode_mut<'a, __WheelsStorage>(
+            storage: &'a __WheelsStorage,
+        ) -> core::result::Result<#view_mut_name<'a, __WheelsStorage>, ::pinocchio::error::ProgramError>
         where
-            S: ::wheels::layout::LayoutStorageMut + ?Sized,
+            __WheelsStorage: ::wheels::layout::LayoutStorageMut + ?Sized,
         {
             let borrowed = storage.borrow_data_mut()?;
             <Self as ::wheels::layout::Decodable>::decode(&borrowed)
@@ -354,11 +354,11 @@ pub(crate) fn expand_fixed_offset_layout(
         /// address must satisfy the declared `buffer_offset`, and every encoded
         /// tag, length, capacity, nested layout, and field boundary must be valid.
         #[inline(always)]
-        pub unsafe fn decode_mut_unchecked<'a, S>(
-            storage: &'a S,
-        ) -> core::result::Result<#view_mut_name<'a, S>, ::pinocchio::error::ProgramError>
+        pub unsafe fn decode_mut_unchecked<'a, __WheelsStorage>(
+            storage: &'a __WheelsStorage,
+        ) -> core::result::Result<#view_mut_name<'a, __WheelsStorage>, ::pinocchio::error::ProgramError>
         where
-            S: ::wheels::layout::LayoutStorageMut + ?Sized,
+            __WheelsStorage: ::wheels::layout::LayoutStorageMut + ?Sized,
         {
             Ok(#view_mut_name {
                 borrowed: storage.borrow_data_mut()?,
@@ -369,23 +369,23 @@ pub(crate) fn expand_fixed_offset_layout(
     let view_mut_bounds = where_bounds.iter();
     let view_mut_type = quote! {
         #[allow(dead_code)]
-        pub struct #view_mut_name<'a, S>
+        pub struct #view_mut_name<'a, __WheelsStorage>
         where
-            S: ::wheels::layout::LayoutStorageMut + ?Sized + 'a,
+            __WheelsStorage: ::wheels::layout::LayoutStorageMut + ?Sized + 'a,
         {
-            borrowed: S::RefMut<'a>,
+            borrowed: __WheelsStorage::RefMut<'a>,
             covers_entire_storage: bool,
         }
 
-        impl<'a, S: ::wheels::layout::LayoutStorageMut + ?Sized> core::fmt::Debug for #view_mut_name<'a, S> {
+        impl<'a, __WheelsStorage: ::wheels::layout::LayoutStorageMut + ?Sized> core::fmt::Debug for #view_mut_name<'a, __WheelsStorage> {
             fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
                 f.debug_struct(stringify!(#view_mut_name)).field("storage_len", &self.borrowed.len()).finish()
             }
         }
 
-        impl<'a, S> #view_mut_name<'a, S>
+        impl<'a, __WheelsStorage> #view_mut_name<'a, __WheelsStorage>
         where
-            S: ::wheels::layout::LayoutStorageMut + ?Sized,
+            __WheelsStorage: ::wheels::layout::LayoutStorageMut + ?Sized,
             #(#view_mut_bounds,)*
         {
             /// Reads the backing bytes through the borrow held by this view.
@@ -397,17 +397,21 @@ pub(crate) fn expand_fixed_offset_layout(
                 self.borrowed.len()
             }
 
-            /// Reads the validated record through an immutable view.
+            /// Reads the record through an immutable view.
             ///
-            /// Views created by `decode_mut()` reuse the existing validation.
+            /// Whole-storage views reuse the validation performed by `decode_mut()`.
             /// Prefix views with following records validate the first record
             /// again only to find its current boundary.
+            ///
+            /// A fallible mutation may modify the record before returning an error.
+            /// After such an error, drop this mutable view and validate the storage
+            /// again with checked decoding before reading it.
             pub fn as_view(&self) -> #view_name<'_> {
                 let bytes = if self.covers_entire_storage {
                     &self.borrowed[..]
                 } else {
                     let end = #struct_name::__validate_prefix(&self.borrowed)
-                        .expect("mutable layout view remains valid");
+                        .expect("mutable record became invalid; revalidate after a failed mutation");
                     &self.borrowed[..end]
                 };
                 #view_name { bytes }
@@ -1402,7 +1406,7 @@ impl FixedFieldKind {
         let offset = quote!((#offset));
         let field_mut_ident = format_ident!("{}_mut", field_ident);
 
-        let guard = quote!(S::RefMut<'a>);
+        let guard = quote!(__WheelsStorage::RefMut<'a>);
         let flexible_slot =
             quote!(::wheels::layout::FlexibleOptionBytes::new(&mut self.borrowed, #offset));
         let (handle, field) = match self {

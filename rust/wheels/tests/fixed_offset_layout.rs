@@ -876,8 +876,10 @@ fn fixed_offset_layout_supports_unchecked_read_and_mutable_views() {
     assert_eq!(view.amount(), 200);
     assert_eq!(view.validator(), Some(&[1; 32]));
 
+    // Checked decoding establishes the required offset for this allocation.
+    PrivateTransferFixedArgs::decode(&encoded).unwrap();
     let storage = TestStorage::new(encoded);
-    // SAFETY: `storage` contains one freshly encoded record at offset zero.
+    // SAFETY: `storage` owns the same validated allocation without moving its bytes.
     let mut view = unsafe { PrivateTransferFixedArgs::decode_mut_unchecked(&storage).unwrap() };
     *view.shuttle_id_mut() = 101;
     view.amount_mut().set(202);
