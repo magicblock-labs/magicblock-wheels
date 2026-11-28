@@ -1,7 +1,7 @@
 use crate::common::{
     any_child_placement_assertion, ensure_allow_dead_code, impl_where_clause, is_bool, is_string,
-    option_inner, parse_value_kind, read_copy_expr, strip_field_attr, usize_lit, vec_inner,
-    AccessMode, BufferOffset, FixedValueKind, MAX_SUPPORTED_VEC_LEN,
+    option_inner, parse_value_kind, strip_field_attr, usize_lit, vec_inner, AccessMode,
+    BufferOffset, FixedValueKind, MAX_SUPPORTED_VEC_LEN,
 };
 use proc_macro2::Span;
 use quote::{format_ident, quote};
@@ -14,7 +14,6 @@ const FIELD_ATTRIBUTES: &[&str] = &["capacity", "extendable", "flexible"];
 const LAYOUT_NAME: &str = "fixed_offset_layout";
 const UNSUPPORTED_FIELD_MESSAGE: &str =
     "fixed_offset_layout fields must be bool, Pubkey, integer primitives, fixed-size arrays, or a final Option<T> containing a supported layout";
-const INTEGER_FIELD_MESSAGE: &str = "field must be an integer primitive";
 
 const MAX_LEN_WIDTH: usize = 8;
 
@@ -290,6 +289,49 @@ pub(crate) fn expand_fixed_offset_layout(
             )
         }
     };
+    let (view_fields, view_init, view_bytes, view_prefix_ptr) = if has_trailing_variable_field {
+        (
+            quote! {
+                prefix: &'a [u8; #struct_name::MIN_DATA_LEN],
+                total_len: usize,
+            },
+            quote! {
+                debug_assert!(bytes.len() >= #struct_name::MIN_DATA_LEN);
+                // SAFETY: the caller guarantees that the validated record contains
+                // the complete fixed prefix.
+                let prefix = unsafe {
+                    &*bytes.as_ptr().cast::<[u8; #struct_name::MIN_DATA_LEN]>()
+                };
+                Self {
+                    prefix,
+                    total_len: bytes.len(),
+                }
+            },
+            quote! {
+                // SAFETY: `prefix` points at the start of the record and
+                // `total_len` was captured from that same validated slice.
+                unsafe { core::slice::from_raw_parts(self.prefix.as_ptr(), self.total_len) }
+            },
+            quote!(self.prefix.as_ptr()),
+        )
+    } else {
+        (
+            quote! {
+                bytes: &'a [u8; #struct_name::DATA_LEN],
+            },
+            quote! {
+                debug_assert_eq!(bytes.len(), #struct_name::DATA_LEN);
+                // SAFETY: the caller guarantees that the slice contains exactly
+                // one validated fixed-size record.
+                let bytes = unsafe {
+                    &*bytes.as_ptr().cast::<[u8; #struct_name::DATA_LEN]>()
+                };
+                Self { bytes }
+            },
+            quote!(&self.bytes[..]),
+            quote!(self.bytes.as_ptr()),
+        )
+    };
     let decode_trait_impls = quote! {
         impl ::wheels::layout::PrefixDecodable for #struct_name {
             type View<'a> = #view_name<'a>;
@@ -297,7 +339,10 @@ pub(crate) fn expand_fixed_offset_layout(
             fn decode_prefix(bytes: &[u8]) -> core::result::Result<(Self::View<'_>, &[u8]), ::wheels::DataLayoutError> {
                 let end = Self::__validate_prefix(bytes)?;
                 let (bytes, remaining) = bytes.split_at(end);
-                Ok((#view_name { bytes }, remaining))
+                // SAFETY: `__validate_prefix` established this record's complete
+                // encoding and `split_at` framed it to the validated length.
+                let view = unsafe { #view_name::__new_unchecked(bytes) };
+                Ok((view, remaining))
             }
         }
     };
@@ -325,7 +370,8 @@ pub(crate) fn expand_fixed_offset_layout(
         /// tag, length, capacity, nested layout, and field boundary must be valid.
         #[inline(always)]
         pub unsafe fn decode_unchecked(bytes: &[u8]) -> #view_name<'_> {
-            #view_name { bytes }
+            // SAFETY: this method forwards its documented requirements.
+            unsafe { #view_name::__new_unchecked(bytes) }
         }
 
         pub fn decode_mut<'a, __WheelsStorage>(
@@ -415,7 +461,9 @@ pub(crate) fn expand_fixed_offset_layout(
                         .expect("mutable record became invalid; revalidate after a failed mutation");
                     &self.borrowed[..end]
                 };
-                #view_name { bytes }
+                // SAFETY: exact mutable views retain their framing. Prefix views
+                // were validated immediately above before being framed to `end`.
+                unsafe { #view_name::__new_unchecked(bytes) }
             }
 
             #(#view_mut_methods)*
@@ -510,12 +558,23 @@ pub(crate) fn expand_fixed_offset_layout(
         #[allow(dead_code)]
         #[derive(Debug)]
         pub struct #view_name<'a> {
-            bytes: &'a [u8],
+            #view_fields
         }
 
         impl<'a> #view_name<'a> #where_clause {
+            #[inline(always)]
+            unsafe fn __new_unchecked(bytes: &'a [u8]) -> Self {
+                #view_init
+            }
+
+            #[inline(always)]
             pub fn bytes(&self) -> &'a [u8] {
-                self.bytes
+                #view_bytes
+            }
+
+            #[inline(always)]
+            fn __prefix_ptr(&self) -> *const u8 {
+                #view_prefix_ptr
             }
 
             #(#view_methods)*
@@ -1257,14 +1316,20 @@ impl FixedFieldKind {
                 let ty = value.ty();
                 let access_mode = value.access_mode();
                 let getter_body = getter_tokens(value, offset.clone())?;
+                let tag = quote! {
+                    // SAFETY: every option tag is part of the validated fixed prefix.
+                    unsafe { *self.__prefix_ptr().add(#offset) }
+                };
 
                 match (optional, access_mode) {
                     (None, AccessMode::Copy) => Ok(quote! {
+                        #[inline(always)]
                         pub fn #field_ident(&self) -> #ty {
                             #getter_body
                         }
                     }),
                     (None, AccessMode::Ref) => Ok(quote! {
+                        #[inline(always)]
                         pub fn #field_ident(&self) -> &#ty {
                             #getter_body
                         }
@@ -1272,16 +1337,18 @@ impl FixedFieldKind {
                     (Some(_), AccessMode::Copy) => {
                         let value_body = getter_tokens(value, quote!(#offset + 1usize))?;
                         Ok(quote! {
+                            #[inline(always)]
                             pub fn #field_ident(&self) -> core::option::Option<#ty> {
-                                (self.bytes[(#offset)] != 0).then(||#value_body)
+                                (#tag != 0).then(|| #value_body)
                             }
                         })
                     }
                     (Some(_), AccessMode::Ref) => {
                         let value_body = getter_tokens(value, quote!(#offset + 1usize))?;
                         Ok(quote! {
+                            #[inline(always)]
                             pub fn #field_ident(&self) -> core::option::Option<&#ty> {
-                                (self.bytes[(#offset)] != 0).then(||#value_body)
+                                (#tag != 0).then(|| #value_body)
                             }
                         })
                     }
@@ -1292,22 +1359,26 @@ impl FixedFieldKind {
                 let flexible_view = quote!(<#ty as ::wheels::layout::PrefixDecodable>::View<'a>);
                 match optional {
                     Optional::Fixed => Ok(quote! {
+                        #[inline(always)]
                         pub fn #field_ident(&self) -> core::option::Option<#fixed_view> {
-                            (self.bytes[#offset] != 0).then(|| {
+                            // SAFETY: the option tag is part of the validated fixed prefix.
+                            (unsafe { *self.__prefix_ptr().add(#offset) } != 0).then(|| {
                                 let start = #offset + 1usize;
                                 let end = start + <#ty as ::wheels::layout::FixedSizeLayout>::DATA_LEN;
-                                <#ty as ::wheels::layout::Decodable>::decode(&self.bytes[start..end])
+                                <#ty as ::wheels::layout::Decodable>::decode(&self.bytes()[start..end])
                                     .expect("validated nested fixed-layout Option")
                             })
                         }
                     }),
                     Optional::Flexible => Ok(quote! {
+                        #[inline(always)]
                         pub fn #field_ident(&self) -> core::option::Option<#flexible_view> {
-                            if self.bytes[#offset] == 0 {
+                            // SAFETY: the option tag is part of the validated fixed prefix.
+                            if unsafe { *self.__prefix_ptr().add(#offset) } == 0 {
                                 return None;
                             }
                             let (child, _) = <#ty as ::wheels::layout::PrefixDecodable>::decode_prefix(
-                                &self.bytes[#offset + 1usize..],
+                                &self.bytes()[#offset + 1usize..],
                             ).expect("validated nested flexible Option");
                             Some(child)
                         }
@@ -1323,6 +1394,7 @@ impl FixedFieldKind {
                     let capacity_name = format_ident!("{}_capacity", accessor_ident(field_ident));
                     match elem {
                         FixedVecElementKind::FixedValue(_) => Ok(quote! {
+                            #[inline(always)]
                             pub fn #field_ident(&self) -> &[#elem_ty] {
                                 let len = #len_expr;
                                 if len == 0 {
@@ -1330,7 +1402,7 @@ impl FixedFieldKind {
                                 }
                                 let start = #offset + #len_width_lit;
                                 let end = start + (len * #elem_size);
-                                ::bytemuck::cast_slice::<u8, #elem_ty>(&self.bytes[start..end])
+                                ::bytemuck::cast_slice::<u8, #elem_ty>(&self.bytes()[start..end])
                             }
 
                             pub const fn #capacity_name(&self) -> usize {
@@ -1338,13 +1410,14 @@ impl FixedFieldKind {
                             }
                         }),
                         FixedVecElementKind::FixedSizeLayout { .. } => Ok(quote! {
+                            #[inline(always)]
                             pub fn #field_ident(
                                 &self,
                             ) -> ::wheels::layout::FixedLayoutSlice<'a, #elem_ty> {
                                 let len = #len_expr;
                                 let start = #offset + #len_width_lit;
                                 let end = start + (len * #elem_size);
-                                ::wheels::layout::FixedLayoutSlice::new(&self.bytes[start..end])
+                                ::wheels::layout::FixedLayoutSlice::new(&self.bytes()[start..end])
                                     .expect("validated fixed-size layout Vec")
                             }
 
@@ -1356,6 +1429,7 @@ impl FixedFieldKind {
                 } else {
                     match elem {
                         FixedVecElementKind::FixedValue(_) => Ok(quote! {
+                            #[inline(always)]
                             pub fn #field_ident(
                                 &self,
                             ) -> ::wheels::layout::ExtendableVec<
@@ -1365,7 +1439,7 @@ impl FixedFieldKind {
                                 ::wheels::layout::FixedValueElement,
                             > {
                                 ::wheels::layout::ExtendableVec::new_fixed_value(
-                                    self.bytes,
+                                    self.bytes(),
                                     #offset,
                                     #len_width_lit,
                                     #elem_size,
@@ -1374,6 +1448,7 @@ impl FixedFieldKind {
                             }
                         }),
                         FixedVecElementKind::FixedSizeLayout { .. } => Ok(quote! {
+                            #[inline(always)]
                             pub fn #field_ident(
                                 &self,
                             ) -> ::wheels::layout::ExtendableVec<
@@ -1383,7 +1458,7 @@ impl FixedFieldKind {
                                 ::wheels::layout::FixedLayoutElement,
                             > {
                                 ::wheels::layout::ExtendableVec::new_fixed_layout(
-                                    self.bytes,
+                                    self.bytes(),
                                     #offset,
                                     #len_width_lit,
                                     #elem_size,
@@ -1931,32 +2006,48 @@ fn nested_offset_assertion(
     }
 }
 
-fn bytes_slice_expr(offset: proc_macro2::TokenStream, len: usize) -> proc_macro2::TokenStream {
-    let len = usize_lit(len);
-    quote!(&self.bytes[#offset..#offset + #len])
-}
-
 fn getter_tokens(
     value: &FixedValueKind,
     offset: proc_macro2::TokenStream,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let ty = value.ty();
-    let slice_expr = bytes_slice_expr(offset, value.size());
     match value.access_mode() {
-        AccessMode::Copy => read_copy_expr(value, slice_expr, LAYOUT_NAME, INTEGER_FIELD_MESSAGE),
-        AccessMode::Ref => Ok(borrow_ref_expr(ty, slice_expr)),
+        AccessMode::Copy => match value {
+            FixedValueKind::Bool { .. } => Ok(quote!({
+                // SAFETY: this fixed field lies within the validated prefix.
+                unsafe { *self.__prefix_ptr().add(#offset) != 0 }
+            })),
+            FixedValueKind::Integer { .. } => Ok(quote!({
+                // SAFETY: this fixed field lies within the validated prefix.
+                let value = unsafe {
+                    core::ptr::read_unaligned(self.__prefix_ptr().add(#offset).cast::<#ty>())
+                };
+                <#ty>::from_le(value)
+            })),
+            FixedValueKind::Array { .. } => Ok(quote!({
+                // SAFETY: this fixed field lies within the validated prefix.
+                unsafe {
+                    core::ptr::read_unaligned(self.__prefix_ptr().add(#offset).cast::<#ty>())
+                }
+            })),
+            FixedValueKind::Pubkey { .. } => Err(syn::Error::new_spanned(
+                ty,
+                format!("Pubkey fields are borrowed by {LAYOUT_NAME}"),
+            )),
+        },
+        AccessMode::Ref => Ok(quote!({
+            // SAFETY: decoding validated both this fixed field's bounds and its
+            // placement. The field type is `Pod`, so every encoded bit pattern is valid.
+            unsafe { &*self.__prefix_ptr().add(#offset).cast::<#ty>() }
+        })),
     }
-}
-
-fn borrow_ref_expr(ty: &Type, bytes_expr: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
-    quote!(::bytemuck::from_bytes::<#ty>(#bytes_expr))
 }
 
 fn read_len_expr(offset: proc_macro2::TokenStream, len_width: usize) -> proc_macro2::TokenStream {
     let len_width = usize_lit(len_width);
     quote!({
         let mut raw = [0u8; 8];
-        raw[..#len_width].copy_from_slice(&self.bytes[#offset..#offset + #len_width]);
+        raw[..#len_width].copy_from_slice(&self.bytes()[#offset..#offset + #len_width]);
         let raw_len = u64::from_le_bytes(raw);
         <usize as core::convert::TryFrom<u64>>::try_from(raw_len).expect("validated len header")
     })
